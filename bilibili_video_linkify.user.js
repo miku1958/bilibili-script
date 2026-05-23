@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bilibili 视频简介 URL 可点击
+// @name         Bilibili 视频简介/评论 URL 可点击
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.16
-// @description  把 bilibili 视频详情页(/video/BVxxx)简介里的纯文本 URL 转成可点击的链接
+// @version      2026.5.23
+// @description  把 bilibili 视频详情页(/video/BVxxx)简介和评论区里的纯文本 URL 转成可点击的链接
 // @author       taozhuang
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/list/*
@@ -20,18 +20,40 @@
   // URL 匹配:常见 http/https 链接,允许末尾不带标点
   const URL_RE = /https?:\/\/[^\s<>"'，。、]+[^\s<>"'，。、.,;:!?)\]]/g;
 
-  // 简介相关容器(包括展开后的更多变体)
+  // 简介相关容器和评论区入口
   const TARGET_SELECTORS = [
     '#v_desc',
-    '.video-desc-container',
-    '.desc-info-text',
-    '.basic-desc-info',
-    '.up-description',
-    '.up-detail-bottom',
-    '.pod-description-dropdown'
+    '#commentapp',
+    'bili-comments'
   ];
 
+  const TEST_PAGES = Object.freeze([
+    {
+      area: 'intro',
+      url: 'https://www.bilibili.com/video/BV1AVdwBmEjA/',
+      expectedUrls: [
+        'https://store.epicgames.com/zh-CN/p/trash-goblin-cd5fd7',
+        'https://store.epicgames.com/zh-CN/p/arranger-a-rolepuzzling-adventure-dbfde7'
+      ]
+    },
+    {
+      area: 'comments',
+      url: 'https://www.bilibili.com/video/BV1NqRyBMEeL',
+      expectedUrls: [
+        'https://pan.baidu.com/s/1RrCmjsOfY_QfXHMXHaMn2A?pwd=igno'
+      ]
+    }
+  ]);
+
   const SKIP_TAGS = new Set(['A', 'SCRIPT', 'STYLE', 'TEXTAREA', 'INPUT', 'CODE']);
+  const observedRoots = new WeakSet();
+  let obs;
+
+  function observeRoot(root) {
+    if (!root || (root.nodeType !== 1 && root.nodeType !== 11) || observedRoots.has(root) || !obs) return;
+    observedRoots.add(root);
+    obs.observe(root, { childList: true, subtree: true, characterData: true });
+  }
 
   function linkifyTextNode(textNode) {
     const text = textNode.nodeValue;
@@ -64,9 +86,12 @@
   }
 
   function walk(root) {
-    if (!root || root.nodeType !== 1) return false;
-    if (SKIP_TAGS.has(root.tagName)) return false;
-    if (root.classList && root.classList.contains('_bili_linkify')) return false;
+    if (!root || (root.nodeType !== 1 && root.nodeType !== 11)) return false;
+    observeRoot(root);
+    if (root.nodeType === 1) {
+      if (SKIP_TAGS.has(root.tagName)) return false;
+      if (root.classList && root.classList.contains('_bili_linkify')) return false;
+    }
 
     let changed = false;
     // 先收集快照,避免边遍历边修改
@@ -85,12 +110,30 @@
     for (const tn of textNodes) {
       if (linkifyTextNode(tn)) changed = true;
     }
+
+    const shadowHosts = [];
+    if (root.nodeType === 1 && root.shadowRoot) shadowHosts.push(root);
+    const ew = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+      acceptNode(el) {
+        if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
+        if (el.classList && el.classList.contains('_bili_linkify')) return NodeFilter.FILTER_REJECT;
+        return el.shadowRoot ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      }
+    });
+    let el;
+    while ((el = ew.nextNode())) shadowHosts.push(el);
+    for (const host of shadowHosts) {
+      if (walk(host.shadowRoot)) changed = true;
+    }
+
     return changed;
   }
 
-  function processAll() {
+  function processAll(root = document) {
+    observeRoot(root);
     for (const sel of TARGET_SELECTORS) {
-      document.querySelectorAll(sel).forEach((el) => walk(el));
+      if (root.nodeType === 1 && root.matches(sel)) walk(root);
+      root.querySelectorAll(sel).forEach((el) => walk(el));
     }
   }
 
@@ -106,8 +149,8 @@
     }, 0);
   }
 
-  const obs = new MutationObserver((muts) => {
-    // 任何 desc 容器内的变更都触发一次扫描;我们已用 _bili_linkify 标记跳过自身产物,不会无限循环
+  obs = new MutationObserver((muts) => {
+    // 任何目标容器内的变更都触发一次扫描;我们已用 _bili_linkify 标记跳过自身产物,不会无限循环
     for (const m of muts) {
       if (m.type === 'childList' && m.addedNodes.length) {
         for (const node of m.addedNodes) {
@@ -119,7 +162,7 @@
     schedule();
   });
 
-  obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+  observeRoot(document.body);
 
   // 初次执行 + SPA 路由切换时再跑一次
   processAll();
