@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.24.6
+// @version      2026.5.24.7
 // @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并清理上下文参数
 // @author       taozhuang
 // @source       https://github.com/tjsky/TabulaBili
@@ -20,18 +20,13 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.24.6';
+  const VERSION = '2026.5.24.7';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
   const KEEP_PERSONALIZED_KEY = 'tabulaBiliTryKeepPersonalized';
+  // 保留 fresh_idx/fetch_row/brush/y_num 等换一换分页参数，否则匿名请求会固定返回同一批内容。
   const ANONYMOUS_QUERY_PARAMS = new Set([
-    'y_num',
-    'last_y_num',
-    'fresh_idx_1h',
-    'fresh_idx',
-    'fetch_row',
-    'brush',
     'screen',
     'seo_info',
     'tt_exp',
