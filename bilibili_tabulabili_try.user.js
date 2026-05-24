@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.24.7
-// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并清理上下文参数
+// @version      2026.5.24.10
+// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并使用随机匿名 ID
 // @author       taozhuang
 // @source       https://github.com/tjsky/TabulaBili
 // @match        https://www.bilibili.com/
@@ -20,18 +20,16 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.24.7';
+  const VERSION = '2026.5.24.10';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
   const KEEP_PERSONALIZED_KEY = 'tabulaBiliTryKeepPersonalized';
-  // 保留 fresh_idx/fetch_row/brush/y_num 等换一换分页参数，否则匿名请求会固定返回同一批内容。
+  // 保留 fresh_idx/fetch_row/brush/y_num 和 last_showlist，否则匿名换一换容易重复同一批内容。
   const ANONYMOUS_QUERY_PARAMS = new Set([
     'screen',
     'seo_info',
     'tt_exp',
-    'last_showlist',
-    'uniq_id',
     'w_rid',
     'wts'
   ]);
@@ -116,6 +114,15 @@
     } catch {}
   }
 
+  function createAnonymousUniqId() {
+    const randomPart = Math.floor(Math.random() * 1e6).toString().padStart(6, '0');
+    return `${Date.now()}${randomPart}`.slice(0, 16);
+  }
+
+  function anonymousUniqId() {
+    return createAnonymousUniqId();
+  }
+
   function requestMode() {
     return keepPersonalized ? 'personalized' : 'anonymous';
   }
@@ -196,11 +203,16 @@
           removedParams.push(key);
         }
       }
+      const originalUniqId = url.searchParams.get('uniq_id');
+      const nextUniqId = anonymousUniqId();
+      url.searchParams.set('uniq_id', nextUniqId);
       if (!url.searchParams.has('ps')) url.searchParams.set('ps', '10');
       return {
         url: url.href,
         removedParams,
-        changed: removedParams.length > 0
+        originalUniqId,
+        nextUniqId,
+        changed: removedParams.length > 0 || originalUniqId !== nextUniqId
       };
     } catch (error) {
       log('warn', 'anonymous-url-parse-failed', { rawUrl, message: error.message });
@@ -306,6 +318,8 @@
         url: shortUrl(input),
         nextUrl: shortUrl(nextInput),
         removedParams: anonymousUrl ? anonymousUrl.removedParams : [],
+        originalUniqId: anonymousUrl ? anonymousUrl.originalUniqId : null,
+        nextUniqId: anonymousUrl ? anonymousUrl.nextUniqId : null,
         originalCredentials,
         nextCredentials: nextInit.credentials,
         requestMode: requestMode(),
@@ -357,6 +371,8 @@
           url: shortUrl(url),
           nextUrl: shortUrl(nextUrl),
           removedParams: anonymousUrl ? anonymousUrl.removedParams : [],
+          originalUniqId: anonymousUrl ? anonymousUrl.originalUniqId : null,
+          nextUniqId: anonymousUrl ? anonymousUrl.nextUniqId : null,
           requestMode: requestMode(),
           withCredentialsBeforeOpen: this.withCredentials
         });
