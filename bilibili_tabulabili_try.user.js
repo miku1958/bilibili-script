@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.24.3
-// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据，并自动触发换一换以验证效果
+// @version      2026.5.24.6
+// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并清理上下文参数
 // @author       taozhuang
+// @source       https://github.com/tjsky/TabulaBili
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
 // @match        https://www.bilibili.com/index.html*
@@ -19,11 +20,26 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.24.3';
+  const VERSION = '2026.5.24.6';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
   const KEEP_PERSONALIZED_KEY = 'tabulaBiliTryKeepPersonalized';
+  const ANONYMOUS_QUERY_PARAMS = new Set([
+    'y_num',
+    'last_y_num',
+    'fresh_idx_1h',
+    'fresh_idx',
+    'fetch_row',
+    'brush',
+    'screen',
+    'seo_info',
+    'tt_exp',
+    'last_showlist',
+    'uniq_id',
+    'w_rid',
+    'wts'
+  ]);
   const installStartedAt = Date.now();
 
   if (pageWindow.__tabulaBiliTryInstalled) {
@@ -154,6 +170,94 @@
     }
   }
 
+  function targetUrlInfo(input) {
+    const rawUrl = toUrlString(input);
+    if (!rawUrl) return null;
+    try {
+      const url = new URL(rawUrl, location.href);
+      const params = {};
+      url.searchParams.forEach((value, key) => {
+        if (key === 'w_rid') params[key] = `${value.slice(0, 8)}...`;
+        else params[key] = value;
+      });
+      return {
+        url: `${url.origin}${url.pathname}`,
+        params
+      };
+    } catch {
+      return { url: rawUrl.slice(0, 160), params: null };
+    }
+  }
+
+  function anonymizeTargetUrl(input) {
+    const rawUrl = toUrlString(input);
+    if (!rawUrl) return null;
+    try {
+      const url = new URL(rawUrl, location.href);
+      const removedParams = [];
+      for (const key of ANONYMOUS_QUERY_PARAMS) {
+        if (url.searchParams.has(key)) {
+          url.searchParams.delete(key);
+          removedParams.push(key);
+        }
+      }
+      if (!url.searchParams.has('ps')) url.searchParams.set('ps', '10');
+      return {
+        url: url.href,
+        removedParams,
+        changed: removedParams.length > 0
+      };
+    } catch (error) {
+      log('warn', 'anonymous-url-parse-failed', { rawUrl, message: error.message });
+      return null;
+    }
+  }
+
+  function extractFeedItems(payload) {
+    const data = payload && payload.data;
+    const candidates = [
+      data && data.item,
+      data && data.items,
+      data && data.list,
+      payload && payload.item,
+      payload && payload.items
+    ];
+    const items = candidates.find((candidate) => Array.isArray(candidate)) || [];
+    return items.slice(0, 12).map((item) => ({
+      title: item && (item.title || item.name || item.card_title || ''),
+      goto: item && item.goto,
+      bvid: item && item.bvid,
+      owner: item && item.owner && item.owner.name || item && item.author || item && item.up_name || '',
+      tname: item && (item.tname || item && item.args && item.args.tname || ''),
+      reason: item && item.rcmd_reason && (item.rcmd_reason.content || item.rcmd_reason.reason_type) || item && item.reason || ''
+    }));
+  }
+
+  function logFeedSample(response, input, mode) {
+    try {
+      response.clone().json().then((payload) => {
+        log('info', 'feed-sample', {
+          requestMode: mode,
+          code: payload && payload.code,
+          url: targetUrlInfo(input),
+          items: extractFeedItems(payload)
+        });
+      }).catch((error) => {
+        log('warn', 'feed-sample-error', {
+          requestMode: mode,
+          url: shortUrl(input),
+          message: error && error.message ? error.message : String(error)
+        });
+      });
+    } catch (error) {
+      log('warn', 'feed-sample-clone-error', {
+        requestMode: mode,
+        url: shortUrl(input),
+        message: error && error.message ? error.message : String(error)
+      });
+    }
+  }
+
   function installFetchHook() {
     const rawFetch = pageWindow.fetch;
     if (typeof rawFetch !== 'function') {
@@ -179,6 +283,7 @@
         });
 
         return rawFetch.apply(this, arguments).then((response) => {
+          logFeedSample(response, input, requestMode());
           log('info', 'fetch-target-personalized-response', {
             url: shortUrl(input),
             status: response.status,
@@ -196,10 +301,16 @@
         });
       }
 
+      const anonymousUrl = anonymizeTargetUrl(input);
+      const nextInput = anonymousUrl && anonymousUrl.changed && (typeof input === 'string' || input instanceof URL)
+        ? anonymousUrl.url
+        : input;
       const nextInit = Object.assign({}, init || {}, { credentials: 'omit' });
 
       log('info', 'fetch-target-credentials-omitted', {
         url: shortUrl(input),
+        nextUrl: shortUrl(nextInput),
+        removedParams: anonymousUrl ? anonymousUrl.removedParams : [],
         originalCredentials,
         nextCredentials: nextInit.credentials,
         requestMode: requestMode(),
@@ -207,9 +318,10 @@
         hasInit: !!init
       });
 
-      return rawFetch.call(this, input, nextInit).then((response) => {
+      return rawFetch.call(this, nextInput, nextInit).then((response) => {
+        logFeedSample(response, nextInput, requestMode());
         log('info', 'fetch-target-response', {
-          url: shortUrl(input),
+          url: shortUrl(nextInput),
           status: response.status,
           ok: response.ok,
           redirected: response.redirected,
@@ -241,16 +353,22 @@
     RawXHR.prototype.open = function tabulaBiliOpen(method, url) {
       this.__tabulaBiliTryTarget = isTargetApi(url);
       this.__tabulaBiliTryMethod = method;
-      this.__tabulaBiliTryUrl = url;
+      const anonymousUrl = this.__tabulaBiliTryTarget && !keepPersonalized ? anonymizeTargetUrl(url) : null;
+      const nextUrl = anonymousUrl && anonymousUrl.changed ? anonymousUrl.url : url;
+      this.__tabulaBiliTryUrl = nextUrl;
       if (this.__tabulaBiliTryTarget) {
         log('info', 'xhr-target-open', {
           method,
           url: shortUrl(url),
+          nextUrl: shortUrl(nextUrl),
+          removedParams: anonymousUrl ? anonymousUrl.removedParams : [],
           requestMode: requestMode(),
           withCredentialsBeforeOpen: this.withCredentials
         });
       }
-      return rawOpen.apply(this, arguments);
+      const args = Array.prototype.slice.call(arguments);
+      args[1] = nextUrl;
+      return rawOpen.apply(this, args);
     };
 
     RawXHR.prototype.send = function tabulaBiliSend() {
