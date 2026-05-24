@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.24.2
+// @version      2026.5.24.3
 // @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据，并自动触发换一换以验证效果
 // @author       taozhuang
 // @match        https://www.bilibili.com/
@@ -19,7 +19,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.24.2';
+  const VERSION = '2026.5.24.3';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
@@ -358,30 +358,6 @@
       #tabula-bili-try-switch input:checked + span::after {
         left: calc(100% - 21px);
       }
-      #tabula-bili-try-switch::before {
-        content: attr(data-tooltip);
-        position: absolute;
-        top: calc(100% + 6px);
-        left: 50%;
-        transform: translate(-50%, -2px);
-        opacity: 0;
-        pointer-events: none;
-        white-space: nowrap;
-        padding: 5px 7px;
-        border-radius: 6px;
-        background: rgba(24, 25, 28, 0.92);
-        color: #fff;
-        font-size: 12px;
-        line-height: 1;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
-        transition: opacity 0.12s ease, transform 0.12s ease;
-        z-index: 1000;
-      }
-      #tabula-bili-try-switch:hover::before,
-      #tabula-bili-try-switch:focus-within::before {
-        opacity: 1;
-        transform: translate(-50%, 0);
-      }
     `;
     document.documentElement.appendChild(style);
   }
@@ -402,10 +378,9 @@
     wrapper.dataset.mode = requestMode();
     input.checked = keepPersonalized;
     syncModeSwitchWidth(document.querySelector('.roll-btn'));
-    const tooltip = keepPersonalized ? '已开启: 保留个性化推荐' : '已关闭: 替换推荐请求';
+    const tooltip = keepPersonalized ? '当前：个性化推荐' : '当前：匿名推荐';
     wrapper.title = tooltip;
     switchLabel.title = tooltip;
-    switchLabel.dataset.tooltip = tooltip;
     switchLabel.setAttribute('aria-label', tooltip);
     input.setAttribute('aria-label', tooltip);
   }
@@ -431,13 +406,7 @@
     const slider = document.createElement('span');
     slider.setAttribute('aria-hidden', 'true');
 
-    input.addEventListener('change', () => {
-      setKeepPersonalized(input.checked, 'switch');
-      if (!keepPersonalized) {
-        rollClicked = false;
-        setTimeout(() => tryClickRollButton('mode-switch-anonymous', true), 0);
-      }
-    });
+    input.addEventListener('change', () => setKeepPersonalized(input.checked, 'switch'));
 
     switchLabel.appendChild(input);
     switchLabel.appendChild(slider);
@@ -464,7 +433,7 @@
     }
     mountModeSwitch(button);
 
-    if (keepPersonalized && reason !== 'mode-switch-anonymous') {
+    if (keepPersonalized) {
       log('info', 'roll-button-skip-personalized-mode', { reason, requestMode: requestMode() });
       return true;
     }
