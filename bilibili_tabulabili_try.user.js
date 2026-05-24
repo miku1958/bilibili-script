@@ -1,0 +1,540 @@
+// ==UserScript==
+// @name         Bilibili TabulaBili JS Ext Try
+// @namespace    http://tampermonkey.net/
+// @version      2026.5.24.2
+// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据，并自动触发换一换以验证效果
+// @author       taozhuang
+// @match        https://www.bilibili.com/
+// @match        https://www.bilibili.com/?*
+// @match        https://www.bilibili.com/index.html*
+// @connect      127.0.0.1
+// @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @run-at       document-start
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
+  const VERSION = '2026.5.24.2';
+  const PREFIX = '[TabulaBiliTry]';
+  const MAX_LOGS = 500;
+  const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
+  const KEEP_PERSONALIZED_KEY = 'tabulaBiliTryKeepPersonalized';
+  const installStartedAt = Date.now();
+
+  if (pageWindow.__tabulaBiliTryInstalled) {
+    console.info(PREFIX, 'already-installed', { version: pageWindow.__tabulaBiliTryInstalled });
+    return;
+  }
+  pageWindow.__tabulaBiliTryInstalled = VERSION;
+
+  const logs = pageWindow.__tabulaBiliTryLogs = pageWindow.__tabulaBiliTryLogs || [];
+  let keepPersonalized = readKeepPersonalized();
+  let modeSwitchMounted = false;
+
+  function nowOffset() {
+    return `+${Date.now() - installStartedAt}ms`;
+  }
+
+  function log(level, event, detail) {
+    const entry = {
+      at: new Date().toISOString(),
+      offset: nowOffset(),
+      event,
+      detail: detail || null
+    };
+    logs.push(entry);
+    if (logs.length > MAX_LOGS) logs.splice(0, logs.length - MAX_LOGS);
+    const printer = console[level] || console.log;
+    printer.call(console, PREFIX, event, entry.detail, entry.offset);
+    sendLog(entry);
+  }
+
+  function sendLog(entry) {
+    try {
+      const body = JSON.stringify(entry);
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: LOG_ENDPOINT,
+          headers: { 'content-type': 'text/plain;charset=UTF-8' },
+          data: body,
+          onerror: () => {},
+          ontimeout: () => {},
+          timeout: 3000
+        });
+        return;
+      }
+      if (navigator.sendBeacon && navigator.sendBeacon(LOG_ENDPOINT, body)) return;
+      pageWindow.fetch(LOG_ENDPOINT, {
+        method: 'POST',
+        mode: 'no-cors',
+        keepalive: true,
+        headers: { 'content-type': 'text/plain;charset=UTF-8' },
+        body
+      }).catch(() => {});
+    } catch {
+      // 本地日志服务不可用时,不影响页面内实验逻辑。
+    }
+  }
+
+  function readKeepPersonalized() {
+    try {
+      if (typeof GM_getValue === 'function') return Boolean(GM_getValue(KEEP_PERSONALIZED_KEY, false));
+    } catch {}
+    try {
+      return pageWindow.localStorage.getItem(KEEP_PERSONALIZED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function writeKeepPersonalized(value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(KEEP_PERSONALIZED_KEY, Boolean(value));
+        return;
+      }
+    } catch {}
+    try {
+      pageWindow.localStorage.setItem(KEEP_PERSONALIZED_KEY, value ? '1' : '0');
+    } catch {}
+  }
+
+  function requestMode() {
+    return keepPersonalized ? 'personalized' : 'anonymous';
+  }
+
+  function setKeepPersonalized(value, reason) {
+    const nextValue = Boolean(value);
+    if (keepPersonalized === nextValue) return;
+    keepPersonalized = nextValue;
+    writeKeepPersonalized(keepPersonalized);
+    updateModeSwitch();
+    log('info', 'mode-changed', {
+      reason,
+      keepPersonalized,
+      requestMode: requestMode()
+    });
+  }
+
+  function toUrlString(input) {
+    if (typeof input === 'string') return input;
+    if (input instanceof URL) return input.href;
+    if (input && typeof input.url === 'string') return input.url;
+    return '';
+  }
+
+  function isTargetApi(input) {
+    const rawUrl = toUrlString(input);
+    if (!rawUrl) return false;
+    try {
+      const url = new URL(rawUrl, location.href);
+      if (url.hostname !== 'api.bilibili.com') return false;
+      const haystack = `${url.pathname}${url.search}`;
+      return haystack.includes('/x/web-interface') && haystack.includes('index/top') && haystack.includes('rcmd');
+    } catch (error) {
+      log('warn', 'target-url-parse-failed', { rawUrl, message: error.message });
+      return false;
+    }
+  }
+
+  function shortUrl(input) {
+    const rawUrl = toUrlString(input);
+    if (!rawUrl) return '';
+    try {
+      const url = new URL(rawUrl, location.href);
+      return `${url.origin}${url.pathname}`;
+    } catch {
+      return rawUrl.slice(0, 160);
+    }
+  }
+
+  function installFetchHook() {
+    const rawFetch = pageWindow.fetch;
+    if (typeof rawFetch !== 'function') {
+      log('warn', 'fetch-hook-skip', { reason: 'window.fetch is not a function' });
+      return;
+    }
+
+    pageWindow.fetch = function tabulaBiliFetch(input, init) {
+      if (!isTargetApi(input)) return rawFetch.apply(this, arguments);
+
+      const originalCredentials = init && Object.prototype.hasOwnProperty.call(init, 'credentials')
+        ? init.credentials
+        : input && typeof input.credentials === 'string'
+          ? input.credentials
+          : '(browser default)';
+      if (keepPersonalized) {
+        log('info', 'fetch-target-keep-personalized', {
+          url: shortUrl(input),
+          originalCredentials,
+          requestMode: requestMode(),
+          inputType: input && input.constructor ? input.constructor.name : typeof input,
+          hasInit: !!init
+        });
+
+        return rawFetch.apply(this, arguments).then((response) => {
+          log('info', 'fetch-target-personalized-response', {
+            url: shortUrl(input),
+            status: response.status,
+            ok: response.ok,
+            redirected: response.redirected,
+            type: response.type
+          });
+          return response;
+        }, (error) => {
+          log('warn', 'fetch-target-personalized-error', {
+            url: shortUrl(input),
+            message: error && error.message ? error.message : String(error)
+          });
+          throw error;
+        });
+      }
+
+      const nextInit = Object.assign({}, init || {}, { credentials: 'omit' });
+
+      log('info', 'fetch-target-credentials-omitted', {
+        url: shortUrl(input),
+        originalCredentials,
+        nextCredentials: nextInit.credentials,
+        requestMode: requestMode(),
+        inputType: input && input.constructor ? input.constructor.name : typeof input,
+        hasInit: !!init
+      });
+
+      return rawFetch.call(this, input, nextInit).then((response) => {
+        log('info', 'fetch-target-response', {
+          url: shortUrl(input),
+          status: response.status,
+          ok: response.ok,
+          redirected: response.redirected,
+          type: response.type
+        });
+        return response;
+      }, (error) => {
+        log('warn', 'fetch-target-error', {
+          url: shortUrl(input),
+          message: error && error.message ? error.message : String(error)
+        });
+        throw error;
+      });
+    };
+
+    log('info', 'fetch-hook-installed', { ok: true });
+  }
+
+  function installXhrHook() {
+    const RawXHR = pageWindow.XMLHttpRequest;
+    if (!RawXHR || !RawXHR.prototype) {
+      log('warn', 'xhr-hook-skip', { reason: 'XMLHttpRequest is not available' });
+      return;
+    }
+
+    const rawOpen = RawXHR.prototype.open;
+    const rawSend = RawXHR.prototype.send;
+
+    RawXHR.prototype.open = function tabulaBiliOpen(method, url) {
+      this.__tabulaBiliTryTarget = isTargetApi(url);
+      this.__tabulaBiliTryMethod = method;
+      this.__tabulaBiliTryUrl = url;
+      if (this.__tabulaBiliTryTarget) {
+        log('info', 'xhr-target-open', {
+          method,
+          url: shortUrl(url),
+          requestMode: requestMode(),
+          withCredentialsBeforeOpen: this.withCredentials
+        });
+      }
+      return rawOpen.apply(this, arguments);
+    };
+
+    RawXHR.prototype.send = function tabulaBiliSend() {
+      if (this.__tabulaBiliTryTarget) {
+        const before = this.withCredentials;
+        if (keepPersonalized) {
+          log('info', 'xhr-target-keep-personalized', {
+            method: this.__tabulaBiliTryMethod,
+            url: shortUrl(this.__tabulaBiliTryUrl),
+            requestMode: requestMode(),
+            withCredentialsBeforeSend: before
+          });
+        } else {
+          try {
+            this.withCredentials = false;
+          } catch (error) {
+            log('warn', 'xhr-with-credentials-set-failed', {
+              method: this.__tabulaBiliTryMethod,
+              url: shortUrl(this.__tabulaBiliTryUrl),
+              message: error.message
+            });
+          }
+          log('info', 'xhr-target-send', {
+            method: this.__tabulaBiliTryMethod,
+            url: shortUrl(this.__tabulaBiliTryUrl),
+            requestMode: requestMode(),
+            withCredentialsBeforeSend: before,
+            withCredentialsAfterPatch: this.withCredentials
+          });
+        }
+        this.addEventListener('loadend', () => {
+          log('info', 'xhr-target-loadend', {
+            method: this.__tabulaBiliTryMethod,
+            url: shortUrl(this.__tabulaBiliTryUrl),
+            requestMode: requestMode(),
+            status: this.status,
+            responseURL: shortUrl(this.responseURL || this.__tabulaBiliTryUrl)
+          });
+        }, { once: true });
+      }
+      return rawSend.apply(this, arguments);
+    };
+
+    log('info', 'xhr-hook-installed', { ok: true });
+  }
+
+  function installModeSwitchStyle() {
+    if (document.getElementById('tabula-bili-try-style')) return;
+    const style = document.createElement('style');
+    style.id = 'tabula-bili-try-style';
+    style.textContent = `
+      #tabula-bili-try-mode {
+        box-sizing: border-box;
+        display: block;
+        flex: 0 0 100%;
+        width: 100%;
+        margin-top: 6px;
+        line-height: 1;
+        z-index: 20;
+      }
+      #tabula-bili-try-switch {
+        position: relative;
+        display: block;
+        width: 56px;
+        height: 24px;
+        flex: none;
+        cursor: pointer;
+      }
+      #tabula-bili-try-switch input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      #tabula-bili-try-switch span {
+        box-sizing: border-box;
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 1px solid rgba(0, 161, 214, 0.36);
+        border-radius: 999px;
+        background: #00a1d6;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+      #tabula-bili-try-switch span::after {
+        content: '';
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.24);
+        transition: left 0.18s ease;
+      }
+      #tabula-bili-try-switch:hover span,
+      #tabula-bili-try-switch:focus-within span {
+        box-shadow: 0 3px 10px rgba(0, 161, 214, 0.2);
+      }
+      #tabula-bili-try-switch input:checked + span {
+        background: #10b981;
+        border-color: rgba(16, 185, 129, 0.4);
+      }
+      #tabula-bili-try-switch input:checked + span::after {
+        left: calc(100% - 21px);
+      }
+      #tabula-bili-try-switch::before {
+        content: attr(data-tooltip);
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 50%;
+        transform: translate(-50%, -2px);
+        opacity: 0;
+        pointer-events: none;
+        white-space: nowrap;
+        padding: 5px 7px;
+        border-radius: 6px;
+        background: rgba(24, 25, 28, 0.92);
+        color: #fff;
+        font-size: 12px;
+        line-height: 1;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+        transition: opacity 0.12s ease, transform 0.12s ease;
+        z-index: 1000;
+      }
+      #tabula-bili-try-switch:hover::before,
+      #tabula-bili-try-switch:focus-within::before {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function syncModeSwitchWidth(rollButton) {
+    const switchLabel = document.getElementById('tabula-bili-try-switch');
+    if (!switchLabel || !rollButton) return;
+    const width = Math.round(rollButton.getBoundingClientRect().width);
+    if (width > 0) switchLabel.style.width = `${width}px`;
+    switchLabel.style.marginLeft = `${Math.max(0, Math.round(rollButton.offsetLeft))}px`;
+  }
+
+  function updateModeSwitch() {
+    const wrapper = document.getElementById('tabula-bili-try-mode');
+    const input = document.getElementById('tabula-bili-try-keep-personalized');
+    const switchLabel = document.getElementById('tabula-bili-try-switch');
+    if (!wrapper || !input || !switchLabel) return;
+    wrapper.dataset.mode = requestMode();
+    input.checked = keepPersonalized;
+    syncModeSwitchWidth(document.querySelector('.roll-btn'));
+    const tooltip = keepPersonalized ? '已开启: 保留个性化推荐' : '已关闭: 替换推荐请求';
+    wrapper.title = tooltip;
+    switchLabel.title = tooltip;
+    switchLabel.dataset.tooltip = tooltip;
+    switchLabel.setAttribute('aria-label', tooltip);
+    input.setAttribute('aria-label', tooltip);
+  }
+
+  function mountModeSwitch(rollButton) {
+    if (!rollButton || modeSwitchMounted || document.getElementById('tabula-bili-try-mode')) {
+      updateModeSwitch();
+      return;
+    }
+    installModeSwitchStyle();
+
+    const wrapper = document.createElement('div');
+    wrapper.id = 'tabula-bili-try-mode';
+
+    const switchLabel = document.createElement('label');
+    switchLabel.id = 'tabula-bili-try-switch';
+
+    const input = document.createElement('input');
+    input.id = 'tabula-bili-try-keep-personalized';
+    input.type = 'checkbox';
+    input.checked = keepPersonalized;
+
+    const slider = document.createElement('span');
+    slider.setAttribute('aria-hidden', 'true');
+
+    input.addEventListener('change', () => {
+      setKeepPersonalized(input.checked, 'switch');
+      if (!keepPersonalized) {
+        rollClicked = false;
+        setTimeout(() => tryClickRollButton('mode-switch-anonymous', true), 0);
+      }
+    });
+
+    switchLabel.appendChild(input);
+    switchLabel.appendChild(slider);
+    wrapper.appendChild(switchLabel);
+    rollButton.insertAdjacentElement('afterend', wrapper);
+    modeSwitchMounted = true;
+    updateModeSwitch();
+    log('info', 'mode-switch-mounted', { keepPersonalized, requestMode: requestMode() });
+  }
+
+  let rollClicked = false;
+  let lastRollMissLogAt = 0;
+
+  function tryClickRollButton(reason, force) {
+    if (rollClicked && !force) return true;
+    const button = document.querySelector('.roll-btn');
+    if (!button) {
+      const now = Date.now();
+      if (now - lastRollMissLogAt > 1000) {
+        lastRollMissLogAt = now;
+        log('debug', 'roll-button-missing', { reason, readyState: document.readyState });
+      }
+      return false;
+    }
+    mountModeSwitch(button);
+
+    if (keepPersonalized && reason !== 'mode-switch-anonymous') {
+      log('info', 'roll-button-skip-personalized-mode', { reason, requestMode: requestMode() });
+      return true;
+    }
+
+    if (window.scrollY >= 100) {
+      log('info', 'roll-button-skip-user-scrolled', { reason, scrollY: window.scrollY });
+      return true;
+    }
+
+    rollClicked = true;
+    log('info', 'roll-button-click', {
+      reason,
+      text: (button.textContent || '').trim(),
+      scrollY: window.scrollY
+    });
+    button.click();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return true;
+  }
+
+  function installRollObserver() {
+    const start = () => {
+      if (tryClickRollButton('start')) return;
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          if (!mutation.addedNodes || mutation.addedNodes.length === 0) continue;
+          if (tryClickRollButton('mutation')) {
+            observer.disconnect();
+            return;
+          }
+        }
+      });
+      observer.observe(document.documentElement || document, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        if (!rollClicked) log('warn', 'roll-button-timeout', { waitedMs: 10000, readyState: document.readyState });
+      }, 10000);
+      log('info', 'roll-observer-installed', { ok: true });
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+      log('info', 'roll-observer-wait-domcontentloaded', { readyState: document.readyState });
+    } else {
+      start();
+    }
+  }
+
+  installFetchHook();
+  installXhrHook();
+  installRollObserver();
+
+  pageWindow.__tabulaBiliTry = {
+    version: VERSION,
+    logs,
+    isTargetApi,
+    getKeepPersonalized: () => keepPersonalized,
+    setKeepPersonalized: (value) => setKeepPersonalized(value, 'debug-api'),
+    requestMode,
+    clickRollButton: () => tryClickRollButton('manual', true),
+    dumpLogs: () => logs.slice(),
+    testTargetFetch: () => pageWindow.fetch('https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?tabula_bili_try=1', { credentials: 'include' })
+  };
+
+  log('info', 'installed', {
+    version: VERSION,
+    href: location.href,
+    readyState: document.readyState,
+    hasUnsafeWindow: pageWindow !== window,
+    keepPersonalized,
+    requestMode: requestMode()
+  });
+})();
