@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.24.10
-// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并使用随机匿名 ID
+// @version      2026.5.24.11
+// @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并延续匿名刷新序号
 // @author       taozhuang
 // @source       https://github.com/tjsky/TabulaBili
 // @match        https://www.bilibili.com/
@@ -20,11 +20,12 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.24.10';
+  const VERSION = '2026.5.24.11';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
   const KEEP_PERSONALIZED_KEY = 'tabulaBiliTryKeepPersonalized';
+  const ANONYMOUS_REFRESH_INDEX_KEY = 'tabulaBiliTryAnonymousRefreshIndex';
   // 保留 fresh_idx/fetch_row/brush/y_num 和 last_showlist，否则匿名换一换容易重复同一批内容。
   const ANONYMOUS_QUERY_PARAMS = new Set([
     'screen',
@@ -123,6 +124,42 @@
     return createAnonymousUniqId();
   }
 
+  function readNumberValue(key, fallback) {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const value = Number(GM_getValue(key, fallback));
+        return Number.isFinite(value) ? value : fallback;
+      }
+    } catch {}
+    try {
+      const value = Number(pageWindow.localStorage.getItem(key));
+      return Number.isFinite(value) ? value : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeNumberValue(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch {}
+    try {
+      pageWindow.localStorage.setItem(key, String(value));
+    } catch {}
+  }
+
+  function nextAnonymousRefreshIndex(originalIndex) {
+    const storedIndex = readNumberValue(ANONYMOUS_REFRESH_INDEX_KEY, 0);
+    const parsedOriginal = Number(originalIndex || 0);
+    const baseIndex = Math.max(storedIndex, Number.isFinite(parsedOriginal) ? parsedOriginal - 1 : 0);
+    const nextIndex = baseIndex >= 50 ? 1 : baseIndex + 1;
+    writeNumberValue(ANONYMOUS_REFRESH_INDEX_KEY, nextIndex);
+    return nextIndex;
+  }
+
   function requestMode() {
     return keepPersonalized ? 'personalized' : 'anonymous';
   }
@@ -206,13 +243,23 @@
       const originalUniqId = url.searchParams.get('uniq_id');
       const nextUniqId = anonymousUniqId();
       url.searchParams.set('uniq_id', nextUniqId);
+      const originalFreshIdx = url.searchParams.get('fresh_idx');
+      const nextRefreshIndex = nextAnonymousRefreshIndex(originalFreshIdx);
+      url.searchParams.set('fresh_idx', String(nextRefreshIndex));
+      url.searchParams.set('fresh_idx_1h', String(nextRefreshIndex));
+      url.searchParams.set('fetch_row', String(nextRefreshIndex));
+      url.searchParams.set('brush', String(Math.max(0, nextRefreshIndex - 1)));
+      if (!url.searchParams.has('y_num')) url.searchParams.set('y_num', '5');
+      if (!url.searchParams.has('last_y_num')) url.searchParams.set('last_y_num', '5');
       if (!url.searchParams.has('ps')) url.searchParams.set('ps', '10');
       return {
         url: url.href,
         removedParams,
         originalUniqId,
         nextUniqId,
-        changed: removedParams.length > 0 || originalUniqId !== nextUniqId
+        originalFreshIdx,
+        nextRefreshIndex,
+        changed: true
       };
     } catch (error) {
       log('warn', 'anonymous-url-parse-failed', { rawUrl, message: error.message });
@@ -320,6 +367,8 @@
         removedParams: anonymousUrl ? anonymousUrl.removedParams : [],
         originalUniqId: anonymousUrl ? anonymousUrl.originalUniqId : null,
         nextUniqId: anonymousUrl ? anonymousUrl.nextUniqId : null,
+        originalFreshIdx: anonymousUrl ? anonymousUrl.originalFreshIdx : null,
+        nextRefreshIndex: anonymousUrl ? anonymousUrl.nextRefreshIndex : null,
         originalCredentials,
         nextCredentials: nextInit.credentials,
         requestMode: requestMode(),
@@ -373,6 +422,8 @@
           removedParams: anonymousUrl ? anonymousUrl.removedParams : [],
           originalUniqId: anonymousUrl ? anonymousUrl.originalUniqId : null,
           nextUniqId: anonymousUrl ? anonymousUrl.nextUniqId : null,
+          originalFreshIdx: anonymousUrl ? anonymousUrl.originalFreshIdx : null,
+          nextRefreshIndex: anonymousUrl ? anonymousUrl.nextRefreshIndex : null,
           requestMode: requestMode(),
           withCredentialsBeforeOpen: this.withCredentials
         });
