@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.26.2
+// @version      2026.5.26.3
 // @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并延续匿名刷新序号
 // @author       taozhuang
 // @source       https://github.com/tjsky/TabulaBili
@@ -20,7 +20,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.26.2';
+  const VERSION = '2026.5.26.3';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';

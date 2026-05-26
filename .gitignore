@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+*.ndjson
+logs/
+var/log/
+debug/logs/
+.tmp/
+tmp/
