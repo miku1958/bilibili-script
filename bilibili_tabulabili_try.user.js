@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili TabulaBili JS Ext Try
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.24.11
+// @version      2026.5.26.2
 // @description  对脚本加载后的 B 站首页推荐请求按开关尝试去凭据并延续匿名刷新序号
 // @author       taozhuang
 // @source       https://github.com/tjsky/TabulaBili
@@ -20,7 +20,7 @@
   'use strict';
 
   const pageWindow = typeof unsafeWindow === 'object' && unsafeWindow ? unsafeWindow : window;
-  const VERSION = '2026.5.24.11';
+  const VERSION = '2026.5.26.2';
   const PREFIX = '[TabulaBiliTry]';
   const MAX_LOGS = 500;
   const LOG_ENDPOINT = 'http://127.0.0.1:17890/tabulabili-log';
@@ -597,11 +597,10 @@
     log('info', 'mode-switch-mounted', { keepPersonalized, requestMode: requestMode() });
   }
 
-  let rollClicked = false;
+  let rollButtonFound = false;
   let lastRollMissLogAt = 0;
 
-  function tryClickRollButton(reason, force) {
-    if (rollClicked && !force) return true;
+  function findAndMountRollButton(reason) {
     const button = document.querySelector('.roll-btn');
     if (!button) {
       const now = Date.now();
@@ -612,7 +611,18 @@
       return false;
     }
     mountModeSwitch(button);
+    rollButtonFound = true;
+    log('info', 'roll-button-ready', { reason, requestMode: requestMode() });
+    return true;
+  }
 
+  function clickRollButton(reason) {
+    const button = document.querySelector('.roll-btn');
+    if (!button) {
+      log('warn', 'roll-button-click-missing', { reason, requestMode: requestMode() });
+      return false;
+    }
+    mountModeSwitch(button);
     if (keepPersonalized) {
       log('info', 'roll-button-skip-personalized-mode', { reason, requestMode: requestMode() });
       return true;
@@ -623,7 +633,6 @@
       return true;
     }
 
-    rollClicked = true;
     log('info', 'roll-button-click', {
       reason,
       text: (button.textContent || '').trim(),
@@ -636,11 +645,11 @@
 
   function installRollObserver() {
     const start = () => {
-      if (tryClickRollButton('start')) return;
+      if (findAndMountRollButton('start')) return;
       const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
           if (!mutation.addedNodes || mutation.addedNodes.length === 0) continue;
-          if (tryClickRollButton('mutation')) {
+          if (findAndMountRollButton('mutation')) {
             observer.disconnect();
             return;
           }
@@ -649,7 +658,7 @@
       observer.observe(document.documentElement || document, { childList: true, subtree: true });
       setTimeout(() => {
         observer.disconnect();
-        if (!rollClicked) log('warn', 'roll-button-timeout', { waitedMs: 10000, readyState: document.readyState });
+        if (!rollButtonFound) log('warn', 'roll-button-timeout', { waitedMs: 10000, readyState: document.readyState });
       }, 10000);
       log('info', 'roll-observer-installed', { ok: true });
     };
@@ -673,7 +682,7 @@
     getKeepPersonalized: () => keepPersonalized,
     setKeepPersonalized: (value) => setKeepPersonalized(value, 'debug-api'),
     requestMode,
-    clickRollButton: () => tryClickRollButton('manual', true),
+    clickRollButton: () => clickRollButton('manual'),
     dumpLogs: () => logs.slice(),
     testTargetFetch: () => pageWindow.fetch('https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?tabula_bili_try=1', { credentials: 'include' })
   };
