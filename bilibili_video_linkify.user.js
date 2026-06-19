@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频简介/评论 URL 可点击
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.19
+// @version      2026.6.19.1
 // @description  把 bilibili 视频详情页(/video/BVxxx)简介和评论区里的纯文本 URL 转成可点击的链接
 // @author       taozhuang
 // @match        https://www.bilibili.com/video/*
@@ -23,6 +23,7 @@
   // 简介相关容器和评论区入口
   const TARGET_SELECTORS = [
     '#v_desc',
+    '.video-desc-container',
     '#commentapp',
     'bili-comments'
   ];
@@ -39,6 +40,14 @@
     {
       area: 'intro',
       url: 'https://www.bilibili.com/video/BV1qfjA67Env',
+      expectedUrls: [
+        'https://store.epicgames.com/p/citizen-sleeper-944858',
+        'https://store.epicgames.com/p/robobeat-5f084b'
+      ]
+    },
+    {
+      area: 'intro',
+      url: 'https://www.bilibili.com/list/watchlater?oid=116770715213705&bvid=BV1qfjA67Env',
       expectedUrls: [
         'https://store.epicgames.com/p/citizen-sleeper-944858',
         'https://store.epicgames.com/p/robobeat-5f084b'
