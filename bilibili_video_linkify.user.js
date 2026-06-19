@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 视频简介/评论 URL 可点击
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.23
+// @version      2026.6.19
 // @description  把 bilibili 视频详情页(/video/BVxxx)简介和评论区里的纯文本 URL 转成可点击的链接
 // @author       taozhuang
 // @match        https://www.bilibili.com/video/*
@@ -34,6 +34,14 @@
       expectedUrls: [
         'https://store.epicgames.com/zh-CN/p/trash-goblin-cd5fd7',
         'https://store.epicgames.com/zh-CN/p/arranger-a-rolepuzzling-adventure-dbfde7'
+      ]
+    },
+    {
+      area: 'intro',
+      url: 'https://www.bilibili.com/video/BV1qfjA67Env',
+      expectedUrls: [
+        'https://store.epicgames.com/p/citizen-sleeper-944858',
+        'https://store.epicgames.com/p/robobeat-5f084b'
       ]
     },
     {
