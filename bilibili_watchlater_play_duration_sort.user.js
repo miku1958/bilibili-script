@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.28.3
+// @version      2026.6.28.8
 // @description  根据 URL 参数 wl_dur(desc=从长到短 / asc=从短到长)对稍后再看播放器的播放列表按时长排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
@@ -26,32 +26,53 @@
     };
   }
 
-  // 接口响应里每个视频都带 arc_info.duration,按 bvid 存下来,
-  // 给那些通过"加载更多"补进 resourceList、但本身没带 pages 时长的项兜底。
-  const durByBvid = new Map();
+  // 播放器的队列(window.__INITIAL_STATE__.resourceList)是按"添加时间"分页懒加载的,
+  // 而且只在起始视频附近加载一个窗口;起始视频在添加列表里靠后时,滚动也补不全。
+  // 所以直接用一次大 ps 的接口请求把整张稍后再看列表拉全,按时长排好,
+  // 映射成 resourceList 的结构后原地替换整个数组(reactive,队列与自动连播都用新顺序)。
+  const API_URL =
+    'https://api.bilibili.com/x/v2/medialist/toview/web' +
+    '?out_referer=&mobi_app=web&ps=1000&desc=false&sort_field=1&web_location=333.1245';
 
-  // ---- 主播放列表:服务端把它直接塞进 HTML 的 window.__INITIAL_STATE__.resourceList ----
-  // 播放器、右侧播放队列、自动连播都读这个数组(原地 sort 会让队列实时重排)。
-  // resourceList 项没有 duration 字段,但每个 pages[].duration 求和就是总时长;
-  // 翻页补进来的项可能没有 pages,就用 bvid->duration 兜底。
-  function resourceDuration(item) {
-    const pages = item && item.pages;
-    if (Array.isArray(pages) && pages.length) {
-      const sum = pages.reduce((acc, p) => acc + (p.duration || 0), 0);
-      if (sum > 0) return sum;
-    }
-    if (item && durByBvid.has(item.bvid)) return durByBvid.get(item.bvid);
-    return -1;
+  function arcDuration(item) {
+    const d = item && item.arc_info && item.arc_info.duration;
+    return typeof d === 'number' ? d : -1;
   }
 
-  function sortResourceList(list) {
-    if (!Array.isArray(list) || list.length === 0) return;
-    list.sort(bySeconds(resourceDuration));
-    list.forEach((it, i) => {
-      it.index = i;
-      it.isHead = i === 0;
-      it.isTail = i === list.length - 1;
-    });
+  function formatViews(n) {
+    if (typeof n !== 'number') return '';
+    return n >= 10000 ? (n / 10000).toFixed(1) + '万播放' : n + '播放';
+  }
+
+  // 把接口项映射成播放器 resourceList 用的结构(稍后再看里基本都是普通投稿视频 type=2)
+  function toResourceItem(apiItem, i, total) {
+    const arc = apiItem.arc_info || {};
+    const pages = (arc.pages || []).map((p) => ({
+      cid: p.cid,
+      title: p.part || arc.title,
+      duration: p.duration || 0,
+      p: p.page || 1,
+    }));
+    return {
+      index: i,
+      oid: arc.aid,
+      bvid: apiItem.bvid,
+      aid: arc.aid,
+      cid: apiItem.cid || arc.cid || (pages[0] && pages[0].cid),
+      type: 2,
+      attr: 0,
+      title: arc.title,
+      cover: (arc.pic || '').replace(/^https?:/, ''),
+      tag: '',
+      views: formatViews(arc.stat && arc.stat.view),
+      pages,
+      isHead: i === 0,
+      isTail: i === total - 1,
+    };
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
   }
 
   function currentResourceList() {
@@ -59,74 +80,42 @@
     return s && Array.isArray(s.resourceList) ? s.resourceList : null;
   }
 
-  // ---- 只"观察"列表接口,记录每个视频的时长,绝不改请求或响应 ----
-  // 之前重建 Response(连同原始 content-encoding/length 头)会让播放器解码失败,
-  // 报"网络状况异常";而改写初始 resourceList 顺序又会打乱分页游标。所以这里只读不改,
-  // 让播放器按原生分页正常加载,排序完全交给下面加载完成后的一次性重排。
-  const API_RE = /\/x\/v2\/medialist\/toview\/web/;
-
-  const origFetch = window.fetch;
-  window.fetch = function (input, init) {
-    const promise = origFetch.call(this, input, init);
-    const url = typeof input === 'string' ? input : (input && input.url) || '';
-    if (API_RE.test(url)) {
-      promise
-        .then((resp) => resp.clone().json())
-        .then((json) => {
-          const list = json && json.data && json.data.list;
-          if (!Array.isArray(list)) return;
-          list.forEach((it) => {
-            const d = it && it.arc_info && it.arc_info.duration;
-            if (it && it.bvid && typeof d === 'number') durByBvid.set(it.bvid, d);
-          });
-        })
-        .catch(() => {});
-    }
-    return promise;
-  };
-
-  // ---- 队列也是懒加载的:不滚到底只渲染前几页 ----
-  // 自动把播放队列容器滚到底,触发播放器原生分页把所有视频加载进 resourceList,
-  // 数量稳定后再一次性按时长就地重排(reactive 数组,原地 sort 队列会实时更新)。
-  function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  function queueScroller() {
-    const content = document.querySelector('.action-list-content');
-    let el = content;
-    while (el) {
-      const cs = getComputedStyle(el);
-      if (/auto|scroll/.test(cs.overflowY) && el.scrollHeight > el.clientHeight) return el;
-      el = el.parentElement;
-    }
-    return content && content.parentElement;
-  }
-
   async function loadAllAndSort() {
-    // 等队列面板挂载
-    for (let i = 0; i < 40 && !document.querySelector('.action-list-content'); i++) {
+    // 等播放器把初始队列建好(resourceList 挂上且有内容)
+    for (let i = 0; i < 60 && !(currentResourceList() && currentResourceList().length); i++) {
       await sleep(250);
     }
-    // 不停滚到底加载,直到数量稳定(加载期间不重排,免得打乱分页与滚动位置)
-    let stable = 0;
-    let lastLen = -1;
-    for (let i = 0; i < 200 && stable < 4; i++) {
-      const scroller = queueScroller();
-      if (scroller) scroller.scrollTo(0, scroller.scrollHeight);
-      await sleep(400);
-      const len = (currentResourceList() || []).length;
-      if (len === lastLen) {
-        stable++;
-      } else {
-        stable = 0;
-        lastLen = len;
-      }
+    if (!currentResourceList()) return;
+
+    let list;
+    try {
+      const r = await fetch(API_URL, { credentials: 'include' });
+      const j = await r.json();
+      list = j && j.data && j.data.list;
+    } catch (e) {
+      console.error('[wl-dur] fetch full toview list failed', e);
+      return;
     }
-    // 全部加载完,一次性按时长重排
-    sortResourceList(currentResourceList());
-    const scroller = queueScroller();
-    if (scroller) scroller.scrollTo(0, 0);
+    if (!Array.isArray(list) || !list.length) return;
+
+    list = list.filter((x) => x && x.arc_info);
+    list.sort(bySeconds(arcDuration));
+    const total = list.length;
+    const items = list.map((it, i) => toResourceItem(it, i, total));
+
+    // 播放器在初始加载阶段会反复把 resourceList 重置回它自己的小窗口,
+    // 所以反复原地替换,直到我们的整张列表不再被覆盖为止。
+    for (let i = 0; i < 30; i++) {
+      const live = currentResourceList();
+      if (!live) break;
+      const stuck = live.length === items.length && live[0] && live[0].bvid === items[0].bvid;
+      if (stuck) {
+        if (i > 0) break; // 经过一轮(400ms)没被覆盖,认为已稳定
+      } else {
+        live.splice(0, live.length, ...items);
+      }
+      await sleep(400);
+    }
   }
 
   if (document.readyState === 'loading') {
