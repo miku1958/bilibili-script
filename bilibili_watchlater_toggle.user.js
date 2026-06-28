@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.28
+// @version      2026.6.28.1
 // @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
