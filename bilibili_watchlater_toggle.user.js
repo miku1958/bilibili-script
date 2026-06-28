@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.28.1
+// @version      2026.6.28.2
 // @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
@@ -24,6 +24,10 @@
   // 按钮文字会被我们改成时长排序的标签,但 toggle 仍需要知道 Vue 真正的排序方向,
   // 所以用 realOrderLabel 记住最近一次真实的"最近/最早"状态。
   let realOrderLabel = RECENT;
+
+  // 当前是否处于时长排序状态:null=否,'desc'=从长到短,'asc'=从短到长。
+  // 点"播放全部"时据此把排序写进播放器 URL(?wl_dur=...)。
+  let durationSort = null;
 
   // 思路:
   // 1) Vue 把 panel-item 在第一次"开菜单"之前是不渲染的 — 我们在脚本加载后,
@@ -75,6 +79,9 @@
     const btn = e.target.closest && e.target.closest('button.order-btn');
     if (!btn) return;
 
+    // 用户切回"最近/最早",时长排序就不再生效
+    durationSort = null;
+
     const itemsExist = !!document.querySelector('.menu-popover__panel-item');
     if (itemsExist) {
       // 已经有 panel-item — 拦掉 Vue 的开关菜单逻辑,我们自己直接合成点 item
@@ -101,6 +108,22 @@
   // 只挂 pointerdown — Vue 的 menu 是 pointerdown 触发,先于 click 处理我们就够了。
   // 同时挂 click 会让一次用户点击触发两次 toggle,反而抵消。
   document.addEventListener('pointerdown', intercept, true);
+
+  // 时长排序状态下点"播放全部":拦掉原生跳转,改成跳到播放器并把排序写进 URL。
+  // 列表 DOM 已经按时长重排过,第一个 card 就是要先播的视频,用它的封面链接做起点。
+  document.addEventListener('click', (e) => {
+    if (!durationSort) return;
+    const btn = e.target.closest && e.target.closest('button.action-btn');
+    if (!btn || !/播放全部/.test(btn.textContent || '')) return;
+    const first = document.querySelector(`${LIST_SELECTOR} ${CARD_SELECTOR} a.bili-cover-card`);
+    const href = first ? first.getAttribute('href') : '';
+    if (!href) return;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    const u = new URL(href.startsWith('//') ? location.protocol + href : href, location.origin);
+    u.searchParams.set('wl_dur', durationSort);
+    location.href = u.toString();
+  }, true);
 
   // ---- 按时长排序:鼠标悬浮排序按钮时额外弹出菜单 ----
   // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
@@ -176,6 +199,7 @@
       menu.classList.remove('wl-dur-menu--busy');
       // 时长排序后把按钮文字改成对应标签(Vue 不知道这个排序,所以手动改)
       setButtonLabel(descending ? LONGEST : SHORTEST);
+      durationSort = descending ? 'desc' : 'asc';
     });
   }
 
