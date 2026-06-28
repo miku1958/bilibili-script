@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.28.2
+// @version      2026.6.28.3
 // @description  根据 URL 参数 wl_dur(desc=从长到短 / asc=从短到长)对稍后再看播放器的播放列表按时长排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
@@ -31,7 +31,7 @@
   const durByBvid = new Map();
 
   // ---- 主播放列表:服务端把它直接塞进 HTML 的 window.__INITIAL_STATE__.resourceList ----
-  // 播放器、右侧播放队列、自动连播都读这个数组,客户端请求改不到它。
+  // 播放器、右侧播放队列、自动连播都读这个数组(原地 sort 会让队列实时重排)。
   // resourceList 项没有 duration 字段,但每个 pages[].duration 求和就是总时长;
   // 翻页补进来的项可能没有 pages,就用 bvid->duration 兜底。
   function resourceDuration(item) {
@@ -44,8 +44,6 @@
     return -1;
   }
 
-  // 就地把 resourceList 按时长排好并重新编号(同一个数组对象是 Vue 的响应式数据,
-  // 原地 sort 会让播放队列实时跟着重排)。
   function sortResourceList(list) {
     if (!Array.isArray(list) || list.length === 0) return;
     list.sort(bySeconds(resourceDuration));
@@ -61,91 +59,35 @@
     return s && Array.isArray(s.resourceList) ? s.resourceList : null;
   }
 
-  // __INITIAL_STATE__ 是页面后面的内联 <script> 赋值的,document-start 时还不存在。
-  // 用 setter 拦截赋值,在播放器读取前就地重排 resourceList。
-  let stateValue;
-  try {
-    Object.defineProperty(window, '__INITIAL_STATE__', {
-      configurable: true,
-      enumerable: true,
-      get() {
-        return stateValue;
-      },
-      set(v) {
-        try {
-          sortResourceList(v && v.resourceList);
-        } catch (e) {
-          console.error('[wl-dur] reorder resourceList failed', e);
-        }
-        stateValue = v;
-      },
-    });
-  } catch (e) {
-    console.error('[wl-dur] define __INITIAL_STATE__ hook failed', e);
-  }
-
-  // ---- 客户端分页/加载更多走的接口,顺带也按时长排,保证翻页内容一致 ----
+  // ---- 只"观察"列表接口,记录每个视频的时长,绝不改请求或响应 ----
+  // 之前重建 Response(连同原始 content-encoding/length 头)会让播放器解码失败,
+  // 报"网络状况异常";而改写初始 resourceList 顺序又会打乱分页游标。所以这里只读不改,
+  // 让播放器按原生分页正常加载,排序完全交给下面加载完成后的一次性重排。
   const API_RE = /\/x\/v2\/medialist\/toview\/web/;
-
-  function arcDuration(item) {
-    const d = item && item.arc_info && item.arc_info.duration;
-    return typeof d === 'number' ? d : -1;
-  }
-
-  function reorder(json) {
-    const data = json && json.data;
-    const list = data && data.list;
-    if (!Array.isArray(list)) return json;
-    list.forEach((it) => {
-      const d = arcDuration(it);
-      if (it && it.bvid && d >= 0) durByBvid.set(it.bvid, d);
-    });
-    list.sort(bySeconds(arcDuration));
-    list.forEach((it, i) => {
-      it.index = i;
-      it.seq = i;
-    });
-    return json;
-  }
 
   const origFetch = window.fetch;
   window.fetch = function (input, init) {
+    const promise = origFetch.call(this, input, init);
     const url = typeof input === 'string' ? input : (input && input.url) || '';
-    if (!API_RE.test(url)) return origFetch.call(this, input, init);
-
-    // 稍后再看上限 100,一次性取全,避免分页只对单页排序
-    let newInput = input;
-    try {
-      const u = new URL(url, location.origin);
-      u.searchParams.set('ps', '100');
-      const newUrl = u.toString();
-      newInput = typeof input === 'string' ? newUrl : new Request(newUrl, input);
-    } catch (e) {
-      console.error('[wl-dur] rewrite url failed', e);
-    }
-
-    return origFetch.call(this, newInput, init).then((resp) =>
-      resp
-        .clone()
-        .json()
+    if (API_RE.test(url)) {
+      promise
+        .then((resp) => resp.clone().json())
         .then((json) => {
-          const sorted = reorder(json);
-          return new Response(JSON.stringify(sorted), {
-            status: resp.status,
-            statusText: resp.statusText,
-            headers: resp.headers,
+          const list = json && json.data && json.data.list;
+          if (!Array.isArray(list)) return;
+          list.forEach((it) => {
+            const d = it && it.arc_info && it.arc_info.duration;
+            if (it && it.bvid && typeof d === 'number') durByBvid.set(it.bvid, d);
           });
         })
-        .catch((e) => {
-          console.error('[wl-dur] reorder failed, fall back to original', e);
-          return resp;
-        })
-    );
+        .catch(() => {});
+    }
+    return promise;
   };
 
   // ---- 队列也是懒加载的:不滚到底只渲染前几页 ----
-  // 自动把播放队列容器滚到底,把所有视频都加载进 resourceList,
-  // 每次有新内容补进来就就地重排,直到数量稳定,保证是全局时长顺序。
+  // 自动把播放队列容器滚到底,触发播放器原生分页把所有视频加载进 resourceList,
+  // 数量稳定后再一次性按时长就地重排(reactive 数组,原地 sort 队列会实时更新)。
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
@@ -166,13 +108,13 @@
     for (let i = 0; i < 40 && !document.querySelector('.action-list-content'); i++) {
       await sleep(250);
     }
+    // 不停滚到底加载,直到数量稳定(加载期间不重排,免得打乱分页与滚动位置)
     let stable = 0;
     let lastLen = -1;
-    for (let i = 0; i < 80 && stable < 3; i++) {
+    for (let i = 0; i < 200 && stable < 4; i++) {
       const scroller = queueScroller();
       if (scroller) scroller.scrollTo(0, scroller.scrollHeight);
-      await sleep(350);
-      sortResourceList(currentResourceList());
+      await sleep(400);
       const len = (currentResourceList() || []).length;
       if (len === lastLen) {
         stable++;
@@ -181,6 +123,7 @@
         lastLen = len;
       }
     }
+    // 全部加载完,一次性按时长重排
     sortResourceList(currentResourceList());
     const scroller = queueScroller();
     if (scroller) scroller.scrollTo(0, 0);
