@@ -106,14 +106,17 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  // 时长文字形如 "MM:SS" 或 "HH:MM:SS",转成秒
+  // 时长文字形如 "MM:SS" 或 "HH:MM:SS"。一个 card 里可能有多个 stat(播放量、弹幕数等),
+  // 不能直接取最后一个 —— 必须挑出真正符合时间格式的那个,否则解析失败会把视频排到错误位置。
   function durationSeconds(card) {
     const stats = card.querySelectorAll('.bili-cover-card__stat');
-    const last = stats[stats.length - 1];
-    const text = last ? (last.textContent || '').trim() : '';
-    const parts = text.split(':').map((n) => parseInt(n, 10));
-    if (parts.some((n) => Number.isNaN(n)) || parts.length === 0) return -1;
-    return parts.reduce((acc, n) => acc * 60 + n, 0);
+    for (const s of stats) {
+      const text = (s.textContent || '').trim();
+      if (/^\d{1,3}(?::\d{2})+$/.test(text)) {
+        return text.split(':').reduce((acc, n) => acc * 60 + parseInt(n, 10), 0);
+      }
+    }
+    return null;
   }
 
   function cards() {
@@ -145,6 +148,10 @@
     list.sort((a, b) => {
       const da = durationSeconds(a);
       const db = durationSeconds(b);
+      // 时长解析不出来的(没有时长的卡片)统一排到末尾,不让 null 干扰顺序
+      if (da === null && db === null) return 0;
+      if (da === null) return 1;
+      if (db === null) return -1;
       return descending ? db - da : da - db;
     });
     list.forEach((c) => sec.appendChild(c));
