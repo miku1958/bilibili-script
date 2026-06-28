@@ -18,6 +18,12 @@
 
   const RECENT = '最近添加';
   const EARLIEST = '最早添加';
+  const LONGEST = '从长到短';
+  const SHORTEST = '从短到长';
+
+  // 按钮文字会被我们改成时长排序的标签,但 toggle 仍需要知道 Vue 真正的排序方向,
+  // 所以用 realOrderLabel 记住最近一次真实的"最近/最早"状态。
+  let realOrderLabel = RECENT;
 
   // 思路:
   // 1) Vue 把 panel-item 在第一次"开菜单"之前是不渲染的 — 我们在脚本加载后,
@@ -39,7 +45,9 @@
 
   function buttonLabel(btn) {
     const t = (btn.textContent || '').trim();
-    return t.startsWith('最早') ? EARLIEST : RECENT;
+    if (t === LONGEST || t === SHORTEST) return realOrderLabel;
+    realOrderLabel = t.startsWith('最早') ? EARLIEST : RECENT;
+    return realOrderLabel;
   }
 
   function findItem(label) {
@@ -106,17 +114,16 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  // 时长文字形如 "MM:SS" 或 "HH:MM:SS"。一个 card 里可能有多个 stat(播放量、弹幕数等),
-  // 不能直接取最后一个 —— 必须挑出真正符合时间格式的那个,否则解析失败会把视频排到错误位置。
+  // 时长文字形如 "MM:SS" 或 "HH:MM:SS"。看过的视频会显示 "已看进度/总时长"(如 "16:52/56:01"),
+  // 总时长是最后一个时间戳,所以取所有 stat 里最后一个符合时间格式的 token。
   function durationSeconds(card) {
-    const stats = card.querySelectorAll('.bili-cover-card__stat');
-    for (const s of stats) {
-      const text = (s.textContent || '').trim();
-      if (/^\d{1,3}(?::\d{2})+$/.test(text)) {
-        return text.split(':').reduce((acc, n) => acc * 60 + parseInt(n, 10), 0);
-      }
-    }
-    return null;
+    const text = Array.from(card.querySelectorAll('.bili-cover-card__stat'))
+      .map((s) => (s.textContent || '').trim())
+      .join(' ');
+    const matches = text.match(/\d{1,3}(?::\d{2})+/g);
+    if (!matches || matches.length === 0) return null;
+    const last = matches[matches.length - 1];
+    return last.split(':').reduce((acc, n) => acc * 60 + parseInt(n, 10), 0);
   }
 
   function cards() {
@@ -167,7 +174,18 @@
     sortByDuration(descending).finally(() => {
       sorting = false;
       menu.classList.remove('wl-dur-menu--busy');
+      // 时长排序后把按钮文字改成对应标签(Vue 不知道这个排序,所以手动改)
+      setButtonLabel(descending ? LONGEST : SHORTEST);
     });
+  }
+
+  // 按钮第一个文本节点就是排序标签,改它的内容即可,保留后面的下拉箭头 svg
+  function setButtonLabel(text) {
+    const btn = document.querySelector('button.order-btn');
+    if (!btn) return;
+    const node = Array.from(btn.childNodes).find((n) => n.nodeType === Node.TEXT_NODE);
+    if (node) node.nodeValue = text + ' ';
+    else btn.insertBefore(document.createTextNode(text + ' '), btn.firstChild);
   }
 
   function buildMenu() {
