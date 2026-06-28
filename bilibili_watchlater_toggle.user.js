@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.5.16
-// @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle
+// @version      2026.6.28
+// @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
 // @match        https://www.bilibili.com/watchlater*
@@ -94,7 +94,117 @@
   // 同时挂 click 会让一次用户点击触发两次 toggle,反而抵消。
   document.addEventListener('pointerdown', intercept, true);
 
-  // 视觉:隐下拉箭头 + toggle 标识 + 把弹层彻底盖掉(panel-item 仍在 DOM 里可被合成 click)
+  // ---- 按时长排序:鼠标悬浮排序按钮时额外弹出菜单 ----
+  // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
+  // (Vue 不会把我们的顺序刷回去)。点"从长到短/从短到长"时:
+  // 先滚到底把所有视频懒加载出来,再按时长重排,最后滚回顶部。
+
+  const LIST_SELECTOR = 'section.watchlater-list-container';
+  const CARD_SELECTOR = '.video-card';
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  // 时长文字形如 "MM:SS" 或 "HH:MM:SS",转成秒
+  function durationSeconds(card) {
+    const stats = card.querySelectorAll('.bili-cover-card__stat');
+    const last = stats[stats.length - 1];
+    const text = last ? (last.textContent || '').trim() : '';
+    const parts = text.split(':').map((n) => parseInt(n, 10));
+    if (parts.some((n) => Number.isNaN(n)) || parts.length === 0) return -1;
+    return parts.reduce((acc, n) => acc * 60 + n, 0);
+  }
+
+  function cards() {
+    const sec = document.querySelector(LIST_SELECTOR);
+    if (!sec) return [];
+    return Array.from(sec.querySelectorAll(CARD_SELECTOR));
+  }
+
+  // 反复滚到底,直到卡片数量与页面高度都稳定,确保懒加载内容全部出现
+  async function loadAll() {
+    const el = document.scrollingElement || document.documentElement;
+    let stable = 0;
+    let lastCount = -1;
+    let lastHeight = -1;
+    for (let i = 0; i < 60 && stable < 3; i++) {
+      el.scrollTo(0, el.scrollHeight);
+      // 触发懒加载后马上滚回顶部
+      el.scrollTo(0, 0);
+      await sleep(450);
+      const count = cards().length;
+      const height = el.scrollHeight;
+      if (count === lastCount && height === lastHeight) {
+        stable++;
+      } else {
+        stable = 0;
+        lastCount = count;
+        lastHeight = height;
+      }
+    }
+  }
+
+  async function sortByDuration(descending) {
+    const sec = document.querySelector(LIST_SELECTOR);
+    if (!sec) return;
+    await loadAll();
+    const list = cards();
+    list.sort((a, b) => {
+      const da = durationSeconds(a);
+      const db = durationSeconds(b);
+      return descending ? db - da : da - db;
+    });
+    list.forEach((c) => sec.appendChild(c));
+    const el = document.scrollingElement || document.documentElement;
+    el.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  let sorting = false;
+  function onSortClick(descending, menu) {
+    if (sorting) return;
+    sorting = true;
+    menu.classList.add('wl-dur-menu--busy');
+    sortByDuration(descending).finally(() => {
+      sorting = false;
+      menu.classList.remove('wl-dur-menu--busy');
+    });
+  }
+
+  function buildMenu() {
+    const popover = document.querySelector('button.order-btn')?.closest('.menu-popover');
+    if (!popover || popover.querySelector('.wl-dur-menu')) return !!popover;
+    popover.classList.add('wl-dur-anchor');
+
+    const menu = document.createElement('div');
+    menu.className = 'wl-dur-menu';
+
+    const longBtn = document.createElement('button');
+    longBtn.className = 'wl-dur-item';
+    longBtn.textContent = '从长到短';
+    longBtn.addEventListener('click', () => onSortClick(true, menu));
+
+    const shortBtn = document.createElement('button');
+    shortBtn.className = 'wl-dur-item';
+    shortBtn.textContent = '从短到长';
+    shortBtn.addEventListener('click', () => onSortClick(false, menu));
+
+    menu.appendChild(longBtn);
+    menu.appendChild(shortBtn);
+    popover.appendChild(menu);
+    return true;
+  }
+
+  // 排序按钮可能在脚本运行后才挂载,轮询直到拿到为止
+  (function waitForButton() {
+    let tries = 0;
+    const timer = setInterval(() => {
+      if (buildMenu() || ++tries > 40) clearInterval(timer);
+    }, 250);
+  })();
+
+  // 视觉:隐下拉箭头 + toggle 标识 + 把原生弹层彻底盖掉(panel-item 仍在 DOM 里可被合成 click)
+  // 以及自定义的时长排序悬浮菜单
   const style = document.createElement('style');
   style.textContent = `
     button.order-btn .option-icon { display: none !important; }
@@ -106,6 +216,38 @@
       opacity: 0.6;
     }
     .vui_popover { visibility: hidden !important; pointer-events: none !important; }
+
+    .menu-popover.wl-dur-anchor { position: relative; }
+    .wl-dur-menu {
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 0;
+      padding: 8px 0 4px;
+      display: none;
+      flex-direction: column;
+      min-width: 100px;
+      background: var(--bili-color-bg, #fff);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+      z-index: 9999;
+    }
+    .menu-popover.wl-dur-anchor:hover .wl-dur-menu { display: flex; }
+    .wl-dur-item {
+      appearance: none;
+      border: none;
+      background: transparent;
+      padding: 8px 14px;
+      font-size: 13px;
+      color: var(--text1, #18191c);
+      text-align: left;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .wl-dur-item:hover { background: rgba(0, 161, 214, 0.1); color: #00a1d6; }
+    .wl-dur-menu--busy { opacity: 0.6; pointer-events: none; }
+    .wl-dur-menu--busy .wl-dur-item { cursor: progress; }
   `;
   document.head.appendChild(style);
 
