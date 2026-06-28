@@ -97,7 +97,7 @@
   // ---- 按时长排序:鼠标悬浮排序按钮时额外弹出菜单 ----
   // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
   // (Vue 不会把我们的顺序刷回去)。点"从长到短/从短到长"时:
-  // 先滚到底把所有视频懒加载出来,再按时长重排,最后滚回顶部。
+  // 持续滚到底把所有视频懒加载出来(直到出现"已经探索到底了～"),再按时长重排,最后滚回顶部。
 
   const LIST_SELECTOR = 'section.watchlater-list-container';
   const CARD_SELECTOR = '.video-card';
@@ -122,26 +122,18 @@
     return Array.from(sec.querySelectorAll(CARD_SELECTOR));
   }
 
-  // 反复滚到底,直到卡片数量与页面高度都稳定,确保懒加载内容全部出现
+  // 列表全部加载完后,底部会出现 "已经探索到底了～" 的提示
+  function reachedEnd() {
+    const empty = document.querySelector('.watchlater-list-empty');
+    return !!empty && /探索到底了/.test(empty.textContent || '') && empty.getClientRects().length > 0;
+  }
+
+  // 持续滚到底部触发懒加载,直到出现 "已经探索到底了～" 为止
   async function loadAll() {
     const el = document.scrollingElement || document.documentElement;
-    let stable = 0;
-    let lastCount = -1;
-    let lastHeight = -1;
-    for (let i = 0; i < 60 && stable < 3; i++) {
+    for (let i = 0; i < 300 && !reachedEnd(); i++) {
       el.scrollTo(0, el.scrollHeight);
-      // 触发懒加载后马上滚回顶部
-      el.scrollTo(0, 0);
-      await sleep(450);
-      const count = cards().length;
-      const height = el.scrollHeight;
-      if (count === lastCount && height === lastHeight) {
-        stable++;
-      } else {
-        stable = 0;
-        lastCount = count;
-        lastHeight = height;
-      }
+      await sleep(300);
     }
   }
 
@@ -223,29 +215,34 @@
       top: 100%;
       right: 0;
       margin-top: 0;
-      padding: 8px 0 4px;
+      padding: 4px;
       display: none;
       flex-direction: column;
       min-width: 100px;
-      background: var(--bili-color-bg, #fff);
-      border: 1px solid rgba(0, 0, 0, 0.08);
-      border-radius: 8px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-      z-index: 9999;
+      background: var(--bg1_float, #fff);
+      border: 1px solid var(--line_regular, #e3e5e7);
+      border-radius: 12px;
+      box-shadow: 0 8px 40px 0 rgba(0, 0, 0, 0.1);
+      z-index: 10000;
     }
     .menu-popover.wl-dur-anchor:hover .wl-dur-menu { display: flex; }
     .wl-dur-item {
       appearance: none;
       border: none;
       background: transparent;
-      padding: 8px 14px;
+      padding: 8px 16px;
+      border-radius: 8px;
       font-size: 13px;
-      color: var(--text1, #18191c);
+      line-height: 1.4;
+      color: var(--text2, #61666d);
       text-align: left;
       cursor: pointer;
       white-space: nowrap;
     }
-    .wl-dur-item:hover { background: rgba(0, 161, 214, 0.1); color: #00a1d6; }
+    .wl-dur-item:hover {
+      background: var(--graph_bg_regular, #f1f2f3);
+      color: var(--brand_blue, #00aeec);
+    }
     .wl-dur-menu--busy { opacity: 0.6; pointer-events: none; }
     .wl-dur-menu--busy .wl-dur-item { cursor: progress; }
   `;
