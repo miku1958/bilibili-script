@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.28.2
+// @version      2026.6.29
 // @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
@@ -125,6 +125,21 @@
     location.href = u.toString();
   }, true);
 
+  // 时长排序状态下直接点某个视频跳转:给它的播放链接也带上 wl_dur,
+  // 这样播放页同样按时长排序,而起播的仍是点击的那个视频(URL 里的 bvid 不变)。
+  // 封面链接通常 target=_blank,所以这里只改写 href、不拦截默认行为。
+  document.addEventListener('click', (e) => {
+    if (!durationSort) return;
+    const a = e.target.closest && e.target.closest('a[href*="watchlater"]');
+    if (!a) return;
+    const raw = a.getAttribute('href') || '';
+    if (!/[?&]bvid=/.test(raw)) return; // 只处理指向具体视频的播放链接
+    const u = new URL(raw.startsWith('//') ? location.protocol + raw : raw, location.origin);
+    if (u.searchParams.get('wl_dur') === durationSort) return; // 已经带上了
+    u.searchParams.set('wl_dur', durationSort);
+    a.setAttribute('href', u.toString());
+  }, true);
+
   // ---- 按时长排序:鼠标悬浮排序按钮时额外弹出菜单 ----
   // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
   // (Vue 不会把我们的顺序刷回去)。点"从长到短/从短到长"时:
@@ -220,18 +235,18 @@
     const menu = document.createElement('div');
     menu.className = 'wl-dur-menu';
 
-    const longBtn = document.createElement('button');
-    longBtn.className = 'wl-dur-item';
-    longBtn.textContent = '从长到短';
-    longBtn.addEventListener('click', () => onSortClick(true, menu));
-
     const shortBtn = document.createElement('button');
     shortBtn.className = 'wl-dur-item';
     shortBtn.textContent = '从短到长';
     shortBtn.addEventListener('click', () => onSortClick(false, menu));
 
-    menu.appendChild(longBtn);
+    const longBtn = document.createElement('button');
+    longBtn.className = 'wl-dur-item';
+    longBtn.textContent = '从长到短';
+    longBtn.addEventListener('click', () => onSortClick(true, menu));
+
     menu.appendChild(shortBtn);
+    menu.appendChild(longBtn);
     popover.appendChild(menu);
     return true;
   }
