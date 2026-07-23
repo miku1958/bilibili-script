@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.29
-// @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长排序
+// @version      2026.7.23
+// @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长、播放量排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
 // @match        https://www.bilibili.com/watchlater*
@@ -20,14 +20,16 @@
   const EARLIEST = '最早添加';
   const LONGEST = '从长到短';
   const SHORTEST = '从短到长';
+  const MOST_VIEWED = '播放最多';
+  const LEAST_VIEWED = '播放最少';
 
-  // 按钮文字会被我们改成时长排序的标签,但 toggle 仍需要知道 Vue 真正的排序方向,
+  // 按钮文字会被我们改成自定义排序标签,但 toggle 仍需要知道 Vue 真正的排序方向,
   // 所以用 realOrderLabel 记住最近一次真实的"最近/最早"状态。
   let realOrderLabel = RECENT;
 
-  // 当前是否处于时长排序状态:null=否,'desc'=从长到短,'asc'=从短到长。
-  // 点"播放全部"时据此把排序写进播放器 URL(?wl_dur=...)。
+  // 当前的自定义排序状态会在点"播放全部"或具体视频时写进播放器 URL。
   let durationSort = null;
+  let viewsSort = null;
 
   // 思路:
   // 1) Vue 把 panel-item 在第一次"开菜单"之前是不渲染的 — 我们在脚本加载后,
@@ -49,7 +51,9 @@
 
   function buttonLabel(btn) {
     const t = (btn.textContent || '').trim();
-    if (t === LONGEST || t === SHORTEST) return realOrderLabel;
+    if (t === LONGEST || t === SHORTEST || t === MOST_VIEWED || t === LEAST_VIEWED) {
+      return realOrderLabel;
+    }
     realOrderLabel = t.startsWith('最早') ? EARLIEST : RECENT;
     return realOrderLabel;
   }
@@ -79,8 +83,9 @@
     const btn = e.target.closest && e.target.closest('button.order-btn');
     if (!btn) return;
 
-    // 用户切回"最近/最早",时长排序就不再生效
+    // 用户切回"最近/最早",自定义排序就不再生效
     durationSort = null;
+    viewsSort = null;
 
     const itemsExist = !!document.querySelector('.menu-popover__panel-item');
     if (itemsExist) {
@@ -109,10 +114,23 @@
   // 同时挂 click 会让一次用户点击触发两次 toggle,反而抵消。
   document.addEventListener('pointerdown', intercept, true);
 
-  // 时长排序状态下点"播放全部":拦掉原生跳转,改成跳到播放器并把排序写进 URL。
-  // 列表 DOM 已经按时长重排过,第一个 card 就是要先播的视频,用它的封面链接做起点。
+  function activeSortParam() {
+    if (durationSort) return ['wl_dur', durationSort];
+    if (viewsSort) return ['wl_views', viewsSort];
+    return null;
+  }
+
+  function applySortParam(url, sortParam) {
+    url.searchParams.delete('wl_dur');
+    url.searchParams.delete('wl_views');
+    url.searchParams.set(sortParam[0], sortParam[1]);
+  }
+
+  // 自定义排序状态下点"播放全部":拦掉原生跳转,改成跳到播放器并把排序写进 URL。
+  // 列表 DOM 已经重排过,第一个 card 就是要先播的视频,用它的封面链接做起点。
   document.addEventListener('click', (e) => {
-    if (!durationSort) return;
+    const sortParam = activeSortParam();
+    if (!sortParam) return;
     const btn = e.target.closest && e.target.closest('button.action-btn');
     if (!btn || !/播放全部/.test(btn.textContent || '')) return;
     const first = document.querySelector(`${LIST_SELECTOR} ${CARD_SELECTOR} a.bili-cover-card`);
@@ -121,32 +139,36 @@
     e.stopImmediatePropagation();
     e.preventDefault();
     const u = new URL(href.startsWith('//') ? location.protocol + href : href, location.origin);
-    u.searchParams.set('wl_dur', durationSort);
+    applySortParam(u, sortParam);
     location.href = u.toString();
   }, true);
 
-  // 时长排序状态下直接点某个视频跳转:给它的播放链接也带上 wl_dur,
-  // 这样播放页同样按时长排序,而起播的仍是点击的那个视频(URL 里的 bvid 不变)。
+  // 自定义排序状态下直接点某个视频跳转:给它的播放链接带上排序参数,
+  // 这样播放页使用相同顺序,而起播的仍是点击的那个视频(URL 里的 bvid 不变)。
   // 封面链接通常 target=_blank,所以这里只改写 href、不拦截默认行为。
   document.addEventListener('click', (e) => {
-    if (!durationSort) return;
+    const sortParam = activeSortParam();
+    if (!sortParam) return;
     const a = e.target.closest && e.target.closest('a[href*="watchlater"]');
     if (!a) return;
     const raw = a.getAttribute('href') || '';
     if (!/[?&]bvid=/.test(raw)) return; // 只处理指向具体视频的播放链接
     const u = new URL(raw.startsWith('//') ? location.protocol + raw : raw, location.origin);
-    if (u.searchParams.get('wl_dur') === durationSort) return; // 已经带上了
-    u.searchParams.set('wl_dur', durationSort);
+    if (u.searchParams.get(sortParam[0]) === sortParam[1]) return; // 已经带上了
+    applySortParam(u, sortParam);
     a.setAttribute('href', u.toString());
   }, true);
 
-  // ---- 按时长排序:鼠标悬浮排序按钮时额外弹出菜单 ----
+  // ---- 自定义排序:鼠标悬浮排序按钮时额外弹出菜单 ----
   // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
-  // (Vue 不会把我们的顺序刷回去)。点"从长到短/从短到长"时:
-  // 持续滚到底把所有视频懒加载出来(直到出现"已经探索到底了～"),再按时长重排,最后滚回顶部。
+  // (Vue 不会把我们的顺序刷回去)。选择时长或播放量排序时:
+  // 持续滚到底把所有视频懒加载出来(直到出现"已经探索到底了～"),重排后滚回顶部。
 
   const LIST_SELECTOR = 'section.watchlater-list-container';
   const CARD_SELECTOR = '.video-card';
+  const API_URL =
+    'https://api.bilibili.com/x/v2/medialist/toview/web' +
+    '?out_referer=&mobi_app=web&ps=1000&desc=false&sort_field=1&web_location=333.1245';
 
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
@@ -187,34 +209,100 @@
 
   async function sortByDuration(descending) {
     const sec = document.querySelector(LIST_SELECTOR);
-    if (!sec) return;
+    if (!sec) return false;
     await loadAll();
     const list = cards();
+    sortCards(list, durationSeconds, descending);
+    list.forEach((c) => sec.appendChild(c));
+    const el = document.scrollingElement || document.documentElement;
+    el.scrollTo({ top: 0, behavior: 'smooth' });
+    return true;
+  }
+
+  function sortCards(list, getValue, descending) {
     list.sort((a, b) => {
-      const da = durationSeconds(a);
-      const db = durationSeconds(b);
-      // 时长解析不出来的(没有时长的卡片)统一排到末尾,不让 null 干扰顺序
+      const da = getValue(a);
+      const db = getValue(b);
+      // 指标缺失的卡片统一排到末尾,不让 null 干扰顺序
       if (da === null && db === null) return 0;
       if (da === null) return 1;
       if (db === null) return -1;
       return descending ? db - da : da - db;
     });
-    list.forEach((c) => sec.appendChild(c));
+  }
+
+  function cardBvid(card) {
+    const link = card.querySelector('a[href*="bvid="]');
+    const match = link && (link.getAttribute('href') || '').match(/[?&]bvid=([^&#]+)/);
+    return match ? match[1] : null;
+  }
+
+  async function loadViewCounts() {
+    try {
+      const response = await fetch(API_URL, { credentials: 'include' });
+      const json = await response.json();
+      const list = json && json.data && json.data.list;
+      if (!Array.isArray(list)) {
+        console.error(`[${new Date().toISOString()}] [wl-sort] invalid toview response`, {
+          result: 'kept original order',
+        });
+        return null;
+      }
+      return new Map(list.map((item) => [
+        item.bvid,
+        item.arc_info && item.arc_info.stat && item.arc_info.stat.view,
+      ]));
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] [wl-sort] fetch view counts failed`, {
+        error,
+        result: 'kept original order',
+      });
+      return null;
+    }
+  }
+
+  async function sortByViews(descending) {
+    const sec = document.querySelector(LIST_SELECTOR);
+    if (!sec) return false;
+    const [, viewCounts] = await Promise.all([loadAll(), loadViewCounts()]);
+    if (!viewCounts) return false;
+    const list = cards();
+    sortCards(list, (card) => {
+      const views = viewCounts.get(cardBvid(card));
+      return typeof views === 'number' ? views : null;
+    }, descending);
+    list.forEach((card) => sec.appendChild(card));
     const el = document.scrollingElement || document.documentElement;
     el.scrollTo({ top: 0, behavior: 'smooth' });
+    return true;
   }
 
   let sorting = false;
-  function onSortClick(descending, menu) {
+  function onSortClick(sortMetric, descending, menu) {
     if (sorting) return;
     sorting = true;
     menu.classList.add('wl-dur-menu--busy');
-    sortByDuration(descending).finally(() => {
+    const sort = sortMetric === 'views' ? sortByViews : sortByDuration;
+    sort(descending).then((sorted) => {
+      if (!sorted) return;
+      if (sortMetric === 'views') {
+        setButtonLabel(descending ? MOST_VIEWED : LEAST_VIEWED);
+        viewsSort = descending ? 'desc' : 'asc';
+        durationSort = null;
+      } else {
+        setButtonLabel(descending ? LONGEST : SHORTEST);
+        durationSort = descending ? 'desc' : 'asc';
+        viewsSort = null;
+      }
+    }).catch((error) => {
+      console.error(`[${new Date().toISOString()}] [wl-sort] sort failed`, {
+        error,
+        sortMetric,
+        result: 'kept original order',
+      });
+    }).finally(() => {
       sorting = false;
       menu.classList.remove('wl-dur-menu--busy');
-      // 时长排序后把按钮文字改成对应标签(Vue 不知道这个排序,所以手动改)
-      setButtonLabel(descending ? LONGEST : SHORTEST);
-      durationSort = descending ? 'desc' : 'asc';
     });
   }
 
@@ -238,15 +326,27 @@
     const shortBtn = document.createElement('button');
     shortBtn.className = 'wl-dur-item';
     shortBtn.textContent = '从短到长';
-    shortBtn.addEventListener('click', () => onSortClick(false, menu));
+    shortBtn.addEventListener('click', () => onSortClick('duration', false, menu));
 
     const longBtn = document.createElement('button');
     longBtn.className = 'wl-dur-item';
     longBtn.textContent = '从长到短';
-    longBtn.addEventListener('click', () => onSortClick(true, menu));
+    longBtn.addEventListener('click', () => onSortClick('duration', true, menu));
+
+    const leastViewedBtn = document.createElement('button');
+    leastViewedBtn.className = 'wl-dur-item';
+    leastViewedBtn.textContent = LEAST_VIEWED;
+    leastViewedBtn.addEventListener('click', () => onSortClick('views', false, menu));
+
+    const mostViewedBtn = document.createElement('button');
+    mostViewedBtn.className = 'wl-dur-item';
+    mostViewedBtn.textContent = MOST_VIEWED;
+    mostViewedBtn.addEventListener('click', () => onSortClick('views', true, menu));
 
     menu.appendChild(shortBtn);
     menu.appendChild(longBtn);
+    menu.appendChild(leastViewedBtn);
+    menu.appendChild(mostViewedBtn);
     popover.appendChild(menu);
     return true;
   }

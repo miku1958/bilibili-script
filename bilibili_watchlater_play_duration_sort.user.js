@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.6.28.8
-// @description  根据 URL 参数 wl_dur(desc=从长到短 / asc=从短到长)对稍后再看播放器的播放列表按时长排序
+// @version      2026.7.23
+// @description  根据 URL 参数 wl_dur 或 wl_views 对稍后再看播放器的播放列表按时长或播放量排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
 // @grant        none
@@ -12,23 +12,32 @@
 (function () {
   'use strict';
 
-  // 排序方向直接写在 URL 里:?wl_dur=desc 从长到短,?wl_dur=asc 从短到长。
-  // 没有这个参数就完全不介入,保持播放器原本(按添加时间)的顺序。
-  const dir = new URLSearchParams(location.search).get('wl_dur');
-  if (dir !== 'desc' && dir !== 'asc') return;
+  // 排序方式直接写在 URL 里:wl_dur 按时长,wl_views 按播放量,值为 desc 或 asc。
+  // 没有有效参数就完全不介入,保持播放器原本(按添加时间)的顺序。
+  const params = new URLSearchParams(location.search);
+  const durationDir = params.get('wl_dur');
+  const viewsDir = params.get('wl_views');
+  const sortMetric = viewsDir === 'desc' || viewsDir === 'asc'
+    ? 'views'
+    : durationDir === 'desc' || durationDir === 'asc' ? 'duration' : null;
+  if (!sortMetric) return;
+  const dir = sortMetric === 'views' ? viewsDir : durationDir;
   const descending = dir === 'desc';
 
-  function bySeconds(getSeconds) {
+  function byValue(getValue) {
     return (a, b) => {
-      const da = getSeconds(a);
-      const db = getSeconds(b);
+      const da = getValue(a);
+      const db = getValue(b);
+      if (da === null && db === null) return 0;
+      if (da === null) return 1;
+      if (db === null) return -1;
       return descending ? db - da : da - db;
     };
   }
 
   // 播放器的队列(window.__INITIAL_STATE__.resourceList)是按"添加时间"分页懒加载的,
   // 而且只在起始视频附近加载一个窗口;起始视频在添加列表里靠后时,滚动也补不全。
-  // 所以直接用一次大 ps 的接口请求把整张稍后再看列表拉全,按时长排好,
+  // 所以直接用一次大 ps 的接口请求把整张稍后再看列表拉全,按指定指标排好,
   // 映射成 resourceList 的结构后原地替换整个数组(reactive,队列与自动连播都用新顺序)。
   const API_URL =
     'https://api.bilibili.com/x/v2/medialist/toview/web' +
@@ -37,6 +46,11 @@
   function arcDuration(item) {
     const d = item && item.arc_info && item.arc_info.duration;
     return typeof d === 'number' ? d : -1;
+  }
+
+  function arcViews(item) {
+    const views = item && item.arc_info && item.arc_info.stat && item.arc_info.stat.view;
+    return typeof views === 'number' ? views : null;
   }
 
   function formatViews(n) {
@@ -93,13 +107,17 @@
       const j = await r.json();
       list = j && j.data && j.data.list;
     } catch (e) {
-      console.error('[wl-dur] fetch full toview list failed', e);
+      console.error(`[${new Date().toISOString()}] [wl-sort] fetch full toview list failed`, {
+        error: e,
+        sortMetric,
+        result: 'kept original queue',
+      });
       return;
     }
     if (!Array.isArray(list) || !list.length) return;
 
     list = list.filter((x) => x && x.arc_info);
-    list.sort(bySeconds(arcDuration));
+    list.sort(byValue(sortMetric === 'views' ? arcViews : arcDuration));
     const total = list.length;
     const items = list.map((it, i) => toResourceItem(it, i, total));
 
