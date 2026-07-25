@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.23
-// @description  根据 URL 参数 wl_dur 或 wl_views 对稍后再看播放器的播放列表按时长或播放量排序
+// @version      2026.7.25
+// @description  根据 URL 参数 wl_added、wl_dur 或 wl_views 对稍后再看播放器的播放列表排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
 // @grant        none
@@ -12,16 +12,19 @@
 (function () {
   'use strict';
 
-  // 排序方式直接写在 URL 里:wl_dur 按时长,wl_views 按播放量,值为 desc 或 asc。
+  // 排序方式直接写在 URL 里:wl_added 按添加时间,wl_dur 按时长,wl_views 按播放量。
   // 没有有效参数就完全不介入,保持播放器原本(按添加时间)的顺序。
   const params = new URLSearchParams(location.search);
+  const addedDir = params.get('wl_added');
   const durationDir = params.get('wl_dur');
   const viewsDir = params.get('wl_views');
   const sortMetric = viewsDir === 'desc' || viewsDir === 'asc'
     ? 'views'
-    : durationDir === 'desc' || durationDir === 'asc' ? 'duration' : null;
+    : durationDir === 'desc' || durationDir === 'asc'
+      ? 'duration'
+      : addedDir === 'desc' || addedDir === 'asc' ? 'added' : null;
   if (!sortMetric) return;
-  const dir = sortMetric === 'views' ? viewsDir : durationDir;
+  const dir = sortMetric === 'views' ? viewsDir : sortMetric === 'duration' ? durationDir : addedDir;
   const descending = dir === 'desc';
 
   function byValue(getValue) {
@@ -45,7 +48,11 @@
 
   function arcDuration(item) {
     const d = item && item.arc_info && item.arc_info.duration;
-    return typeof d === 'number' ? d : -1;
+    return typeof d === 'number' ? d : null;
+  }
+
+  function arcAddedAt(item) {
+    return typeof item.add_at === 'number' ? item.add_at : null;
   }
 
   function arcViews(item) {
@@ -117,7 +124,10 @@
     if (!Array.isArray(list) || !list.length) return;
 
     list = list.filter((x) => x && x.arc_info);
-    list.sort(byValue(sortMetric === 'views' ? arcViews : arcDuration));
+    const getSortValue = sortMetric === 'views'
+      ? arcViews
+      : sortMetric === 'duration' ? arcDuration : arcAddedAt;
+    list.sort(byValue(getSortValue));
     const total = list.length;
     const items = list.map((it, i) => toResourceItem(it, i, total));
 
