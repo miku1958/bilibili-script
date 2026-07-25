@@ -228,6 +228,9 @@ function createElement(tagName) {
     setAttribute(name, value) {
       attributes.set(name, String(value));
     },
+    removeAttribute(name) {
+      attributes.delete(name);
+    },
     getAttribute(name) {
       return attributes.get(name) ?? null;
     },
@@ -388,6 +391,8 @@ async function createToggleHarness() {
   };
   vm.runInNewContext(toggleSource, sandbox);
   await flushAsyncWork();
+  orderButton.dispatchEvent(new EventMock('mouseenter', { view: sandbox.window }));
+  await flushAsyncWork();
 
   const menuItems = new Map(
     (panel?.children || [])
@@ -395,8 +400,15 @@ async function createToggleHarness() {
       .map((child) => [child.dataset.sortMetric, child]),
   );
 
-  async function clickMetric(metric) {
-    menuItems.get(metric).click();
+  async function chooseMenu(metric) {
+    const item = menuItems.get(metric);
+    assert.equal(item.hidden, false, `${metric} must be visible in the menu`);
+    item.click();
+    await flushAsyncWork();
+  }
+
+  async function clickCurrent() {
+    orderButton.click();
     await flushAsyncWork();
   }
 
@@ -433,13 +445,18 @@ async function createToggleHarness() {
       controls,
       fetchCalls,
       mainLabel: orderLabel.nodeValue.trim(),
+      mainTitle: orderButton.title,
       menuClassNames: Array.from(menuItems.values(), (item) => item.className),
+      visibleMenuLabels: Array.from(menuItems.values())
+        .filter((item) => !item.hidden)
+        .map((item) => item.textContent),
       scrollCalls,
     };
   }
 
   return {
-    clickMetric,
+    chooseMenu,
+    clickCurrent,
     state,
     videoUrl,
   };
@@ -449,16 +466,46 @@ function activeControl(state) {
   return state.controls.find((control) => control.active);
 }
 
-test('native sort menu defaults added time through native API without scrolling', async () => {
+test('current sort stays on the button while the native menu shows the other metrics', async () => {
   const harness = await createToggleHarness();
 
   let state = harness.state();
   assert.deepEqual(state.controls.map((control) => control.label), ['添加时间', '播放量', '时长']);
-  assert.deepEqual(activeControl(state), { active: true, label: '添加时间', metric: 'added' });
+  assert.deepEqual(activeControl(state), { active: true, label: '播放量', metric: 'views' });
   assert.ok(state.menuClassNames.every((className) => /menu-popover__panel-item/.test(className)));
-  assert.equal(state.mainLabel, '添加时间 · 旧到新');
+  assert.equal(state.mainLabel, '播放量');
+  assert.equal(state.mainTitle, '播放量：少到多');
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长']);
   assert.equal(state.fetchCalls, 0);
   assert.equal(state.scrollCalls, 0);
+  assert.deepEqual(state.bvids, [
+    'BV_LOW_DURATION',
+    'BV_LOW_VIEWS',
+    'BV_HIGH_DURATION',
+    'BV_MISSING_VIEWS',
+  ]);
+  assert.equal(harness.videoUrl().searchParams.get('wl_views'), 'asc');
+
+  await harness.clickCurrent();
+  state = harness.state();
+  assert.equal(state.mainLabel, '播放量');
+  assert.equal(state.mainTitle, '播放量：多到少');
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长']);
+  assert.deepEqual(state.bvids, [
+    'BV_LOW_DURATION',
+    'BV_HIGH_DURATION',
+    'BV_LOW_VIEWS',
+    'BV_MISSING_VIEWS',
+  ]);
+  assert.equal(harness.videoUrl().searchParams.get('wl_views'), 'desc');
+
+  await harness.chooseMenu('added');
+  state = harness.state();
+  assert.equal(activeControl(state).metric, 'added');
+  assert.equal(state.mainLabel, '添加时间');
+  assert.equal(state.mainTitle, '添加时间：旧到新');
+  assert.deepEqual(state.visibleMenuLabels, ['播放量', '时长']);
+  const scrollCallsBeforeAddedToggle = state.scrollCalls;
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -466,12 +513,15 @@ test('native sort menu defaults added time through native API without scrolling'
     'BV_HIGH_DURATION',
   ]);
   assert.equal(harness.videoUrl().searchParams.get('wl_added'), 'asc');
+  assert.equal(harness.videoUrl().searchParams.has('wl_views'), false);
+  assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
 
-  await harness.clickMetric('added');
+  await harness.clickCurrent();
   state = harness.state();
-  assert.equal(state.mainLabel, '添加时间 · 新到旧');
-  assert.equal(state.fetchCalls, 0);
-  assert.equal(state.scrollCalls, 0);
+  assert.equal(state.mainLabel, '添加时间');
+  assert.equal(state.mainTitle, '添加时间：新到旧');
+  assert.deepEqual(state.visibleMenuLabels, ['播放量', '时长']);
+  assert.equal(state.scrollCalls, scrollCallsBeforeAddedToggle);
   assert.deepEqual(state.bvids, [
     'BV_HIGH_DURATION',
     'BV_LOW_VIEWS',
@@ -480,34 +530,12 @@ test('native sort menu defaults added time through native API without scrolling'
   ]);
   assert.equal(harness.videoUrl().searchParams.get('wl_added'), 'desc');
 
-  await harness.clickMetric('views');
-  state = harness.state();
-  assert.equal(activeControl(state).metric, 'views');
-  assert.equal(state.mainLabel, '播放量 · 少到多');
-  assert.deepEqual(state.bvids, [
-    'BV_LOW_VIEWS',
-    'BV_HIGH_DURATION',
-    'BV_LOW_DURATION',
-    'BV_MISSING_VIEWS',
-  ]);
-  assert.equal(harness.videoUrl().searchParams.get('wl_views'), 'asc');
-  assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
-  assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
-
-  await harness.clickMetric('views');
-  state = harness.state();
-  assert.equal(state.mainLabel, '播放量 · 多到少');
-  assert.deepEqual(state.bvids, [
-    'BV_LOW_DURATION',
-    'BV_HIGH_DURATION',
-    'BV_LOW_VIEWS',
-    'BV_MISSING_VIEWS',
-  ]);
-
-  await harness.clickMetric('duration');
+  await harness.chooseMenu('duration');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'duration');
-  assert.equal(state.mainLabel, '时长 · 短到长');
+  assert.equal(state.mainLabel, '时长');
+  assert.equal(state.mainTitle, '时长：短到长');
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量']);
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -515,9 +543,11 @@ test('native sort menu defaults added time through native API without scrolling'
     'BV_HIGH_DURATION',
   ]);
 
-  await harness.clickMetric('duration');
+  await harness.clickCurrent();
   state = harness.state();
-  assert.equal(state.mainLabel, '时长 · 长到短');
+  assert.equal(state.mainLabel, '时长');
+  assert.equal(state.mainTitle, '时长：长到短');
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量']);
   assert.deepEqual(state.bvids, [
     'BV_HIGH_DURATION',
     'BV_LOW_VIEWS',
@@ -528,16 +558,13 @@ test('native sort menu defaults added time through native API without scrolling'
   assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
   assert.equal(harness.videoUrl().searchParams.has('wl_views'), false);
 
-  await harness.clickMetric('views');
+  await harness.chooseMenu('views');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'views');
-  assert.equal(state.mainLabel, '播放量 · 少到多');
-
-  await harness.clickMetric('added');
-  state = harness.state();
-  assert.equal(activeControl(state).metric, 'added');
-  assert.equal(state.mainLabel, '添加时间 · 旧到新');
-  assert.equal(harness.videoUrl().searchParams.get('wl_added'), 'asc');
+  assert.equal(state.mainLabel, '播放量');
+  assert.equal(state.mainTitle, '播放量：少到多');
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长']);
+  assert.equal(harness.videoUrl().searchParams.get('wl_views'), 'asc');
+  assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
   assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
-  assert.equal(harness.videoUrl().searchParams.has('wl_views'), false);
 });
