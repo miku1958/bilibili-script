@@ -189,6 +189,7 @@ function createElement(tagName) {
     appendChild(child) {
       this.children.push(child);
       child.parentElement = this;
+      for (const observer of this._mutationObservers || []) queueMicrotask(observer);
       return child;
     },
     after(...nodes) {
@@ -206,6 +207,21 @@ function createElement(tagName) {
       this.dispatch(event.type, event);
       return true;
     },
+    click() {
+      this.dispatch('click', {
+        type: 'click',
+        preventDefault() {},
+        stopImmediatePropagation() {},
+        stopPropagation() {},
+      });
+    },
+    cloneNode() {
+      const clone = createElement(this.tagName);
+      clone.className = this.className;
+      for (const className of this.className.split(/\s+/).filter(Boolean)) clone.classList.add(className);
+      for (const [name, value] of attributes) clone.setAttribute(name, value);
+      return clone;
+    },
     insertBefore(child) {
       this.childNodes.unshift(child);
     },
@@ -215,8 +231,17 @@ function createElement(tagName) {
     getAttribute(name) {
       return attributes.get(name) ?? null;
     },
-    querySelector() {
-      return null;
+    querySelector(selector) {
+      return this.querySelectorAll(selector)[0] || null;
+    },
+    querySelectorAll(selector) {
+      if (selector === ':scope > .menu-popover__panel-item') {
+        return this.children.filter((child) => child.classList.contains('menu-popover__panel-item'));
+      }
+      if (selector === '.wl-sort-menu-item') {
+        return this.children.filter((child) => child.classList.contains('wl-sort-menu-item'));
+      }
+      return [];
     },
   };
   return element;
@@ -258,6 +283,36 @@ async function createToggleHarness() {
 
   const cardsByBvid = new Map(apiItems.map((item) => [item.bvid, createCard(item)]));
   let cardOrder = apiItems.map((item) => cardsByBvid.get(item.bvid));
+  let fetchCalls = 0;
+  let scrollCalls = 0;
+  let panel = null;
+
+  function nativeItem(label, cards) {
+    const item = createElement('div');
+    item.className = 'menu-popover__panel-item';
+    item.classList.add('menu-popover__panel-item');
+    item.textContent = label;
+    item.addEventListener('click', () => {
+      cardOrder = cards.slice();
+      orderLabel.nodeValue = `${label} `;
+      orderButton.textContent = label;
+    });
+    return item;
+  }
+
+  orderButton.addEventListener('mouseenter', () => {
+    if (panel) return;
+    const addedAscending = apiItems
+      .slice()
+      .sort((left, right) => left.add_at - right.add_at)
+      .map((item) => cardsByBvid.get(item.bvid));
+    panel = createElement('div');
+    panel.className = 'menu-popover__panel';
+    panel.classList.add('menu-popover__panel');
+    panel.appendChild(nativeItem('最近添加', addedAscending.slice().reverse()));
+    panel.appendChild(nativeItem('最早添加', addedAscending));
+    popover.appendChild(panel);
+  });
 
   const section = {
     appendChild(card) {
@@ -267,9 +322,9 @@ async function createToggleHarness() {
     querySelectorAll: () => cardOrder.slice(),
   };
   const document = {
-    documentElement: { scrollTo() {} },
+    documentElement: { scrollTo() { scrollCalls += 1; } },
     head: { appendChild() {} },
-    scrollingElement: { scrollTo() {} },
+    scrollingElement: { scrollTo() { scrollCalls += 1; } },
     addEventListener(type, listener) {
       const listeners = documentListeners.get(type) || [];
       listeners.push(listener);
@@ -280,21 +335,45 @@ async function createToggleHarness() {
     querySelector(selector) {
       if (selector === 'button.order-btn') return orderButton;
       if (selector === 'section.watchlater-list-container') return section;
+      if (selector === '.menu-popover__panel') return panel;
       if (selector === '.watchlater-list-empty') {
         return { getClientRects: () => [1], textContent: '已经探索到底了～' };
       }
       return null;
     },
-    querySelectorAll: () => [],
+    querySelectorAll(selector) {
+      if (selector === '.menu-popover__panel-item') return panel ? panel.children.slice() : [];
+      return [];
+    },
   };
+  class EventMock {
+    constructor(type, options) {
+      this.type = type;
+      Object.assign(this, options);
+    }
+  }
+  class MutationObserverMock {
+    constructor(callback) {
+      this.callback = callback;
+    }
+    observe(target) {
+      target._mutationObservers ||= [];
+      target._mutationObservers.push(this.callback);
+    }
+  }
   const sandbox = {
     Date,
     Map,
+    MouseEvent: EventMock,
+    MutationObserver: MutationObserverMock,
     Node: { TEXT_NODE: 3 },
     URL,
     console,
     document,
-    fetch: async () => ({ json: async () => ({ data: { list: apiItems } }) }),
+    fetch: async () => {
+      fetchCalls += 1;
+      return { json: async () => ({ data: { list: apiItems } }) };
+    },
     location: {
       origin: 'https://www.bilibili.com',
       protocol: 'https:',
@@ -310,25 +389,14 @@ async function createToggleHarness() {
   vm.runInNewContext(toggleSource, sandbox);
   await flushAsyncWork();
 
-  const buttons = new Map([
-    ['added', orderButton],
-    ...sortContainer.children
-      .filter((child) => child.dataset.sortMetric && child !== popover)
+  const menuItems = new Map(
+    (panel?.children || [])
+      .filter((child) => child.classList.contains('wl-sort-menu-item'))
       .map((child) => [child.dataset.sortMetric, child]),
-  ]);
+  );
 
   async function clickMetric(metric) {
-    if (metric === 'added') {
-      const event = {
-        target: { closest: (selector) => selector === 'button.order-btn' ? orderButton : null },
-        preventDefault() {},
-        stopImmediatePropagation() {},
-        stopPropagation() {},
-      };
-      (documentListeners.get('pointerdown') || []).forEach((listener) => listener(event));
-    } else {
-      buttons.get(metric).dispatch('click');
-    }
+    menuItems.get(metric).click();
     await flushAsyncWork();
   }
 
@@ -355,15 +423,18 @@ async function createToggleHarness() {
   }
 
   function state() {
-    const controls = Array.from(buttons, ([metric, button]) => ({
-      active: button.classList.contains('wl-sort-active'),
-      direction: button.dataset.direction || null,
-      label: metric === 'added' ? orderLabel.nodeValue.trim() : button.textContent,
+    const controls = Array.from(menuItems, ([metric, item]) => ({
+      active: item.getAttribute('aria-checked') === 'true',
+      label: item.textContent,
       metric,
     }));
     return {
       bvids: cardOrder.map((card) => card.bvid),
       controls,
+      fetchCalls,
+      mainLabel: orderLabel.nodeValue.trim(),
+      menuClassNames: Array.from(menuItems.values(), (item) => item.className),
+      scrollCalls,
     };
   }
 
@@ -378,17 +449,16 @@ function activeControl(state) {
   return state.controls.find((control) => control.active);
 }
 
-test('three sort buttons default ascending, toggle in place, and reset when switching', async () => {
+test('native sort menu defaults added time through native API without scrolling', async () => {
   const harness = await createToggleHarness();
 
   let state = harness.state();
   assert.deepEqual(state.controls.map((control) => control.label), ['添加时间', '播放量', '时长']);
-  assert.deepEqual(activeControl(state), {
-    active: true,
-    direction: 'asc',
-    label: '添加时间',
-    metric: 'added',
-  });
+  assert.deepEqual(activeControl(state), { active: true, label: '添加时间', metric: 'added' });
+  assert.ok(state.menuClassNames.every((className) => /menu-popover__panel-item/.test(className)));
+  assert.equal(state.mainLabel, '添加时间 · 旧到新');
+  assert.equal(state.fetchCalls, 0);
+  assert.equal(state.scrollCalls, 0);
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -399,7 +469,9 @@ test('three sort buttons default ascending, toggle in place, and reset when swit
 
   await harness.clickMetric('added');
   state = harness.state();
-  assert.equal(activeControl(state).direction, 'desc');
+  assert.equal(state.mainLabel, '添加时间 · 新到旧');
+  assert.equal(state.fetchCalls, 0);
+  assert.equal(state.scrollCalls, 0);
   assert.deepEqual(state.bvids, [
     'BV_HIGH_DURATION',
     'BV_LOW_VIEWS',
@@ -411,7 +483,7 @@ test('three sort buttons default ascending, toggle in place, and reset when swit
   await harness.clickMetric('views');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'views');
-  assert.equal(activeControl(state).direction, 'asc');
+  assert.equal(state.mainLabel, '播放量 · 少到多');
   assert.deepEqual(state.bvids, [
     'BV_LOW_VIEWS',
     'BV_HIGH_DURATION',
@@ -424,7 +496,7 @@ test('three sort buttons default ascending, toggle in place, and reset when swit
 
   await harness.clickMetric('views');
   state = harness.state();
-  assert.equal(activeControl(state).direction, 'desc');
+  assert.equal(state.mainLabel, '播放量 · 多到少');
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_HIGH_DURATION',
@@ -435,7 +507,7 @@ test('three sort buttons default ascending, toggle in place, and reset when swit
   await harness.clickMetric('duration');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'duration');
-  assert.equal(activeControl(state).direction, 'asc');
+  assert.equal(state.mainLabel, '时长 · 短到长');
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -445,7 +517,7 @@ test('three sort buttons default ascending, toggle in place, and reset when swit
 
   await harness.clickMetric('duration');
   state = harness.state();
-  assert.equal(activeControl(state).direction, 'desc');
+  assert.equal(state.mainLabel, '时长 · 长到短');
   assert.deepEqual(state.bvids, [
     'BV_HIGH_DURATION',
     'BV_LOW_VIEWS',
@@ -459,12 +531,12 @@ test('three sort buttons default ascending, toggle in place, and reset when swit
   await harness.clickMetric('views');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'views');
-  assert.equal(activeControl(state).direction, 'asc');
+  assert.equal(state.mainLabel, '播放量 · 少到多');
 
   await harness.clickMetric('added');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'added');
-  assert.equal(activeControl(state).direction, 'asc');
+  assert.equal(state.mainLabel, '添加时间 · 旧到新');
   assert.equal(harness.videoUrl().searchParams.get('wl_added'), 'asc');
   assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
   assert.equal(harness.videoUrl().searchParams.has('wl_views'), false);

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.25
-// @description  把稍后再看排序改成添加时间、播放量、时长三个按钮，重复点击当前按钮时反转顺序
+// @version      2026.7.25.1
+// @description  在原生排序菜单中提供添加时间、播放量、时长三项，重复点击当前项时反转顺序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
 // @match        https://www.bilibili.com/watchlater*
@@ -29,20 +29,8 @@
 
   let activeSortMetric = null;
   let activeSortDirection = null;
-  const sortButtons = new Map();
-
-  function intercept(e) {
-    const btn = e.target.closest && e.target.closest('button.order-btn');
-    if (!btn) return;
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-    e.preventDefault();
-    onSortClick('added');
-  }
-
-  // 只挂 pointerdown — Vue 的 menu 是 pointerdown 触发,先于 click 处理我们就够了。
-  // 同时挂 click 会让一次用户点击触发两次 toggle,反而抵消。
-  document.addEventListener('pointerdown', intercept, true);
+  const sortMenuItems = new Map();
+  let menuObserver = null;
 
   function activeSortParam() {
     if (activeSortMetric === 'added') return ['wl_added', activeSortDirection];
@@ -94,6 +82,7 @@
   // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
   // (Vue 不会把我们的顺序刷回去)。选择时长或播放量排序时:
   // 持续滚到底把所有视频懒加载出来(直到出现"已经探索到底了～"),重排后滚回顶部。
+  // 添加时间复用原生菜单项,由 Vue 自己请求 history/toview API,不会触发滚动加载。
 
   const LIST_SELECTOR = 'section.watchlater-list-container';
   const CARD_SELECTOR = '.video-card';
@@ -206,8 +195,46 @@
     return true;
   }
 
-  function sortByAddedTime(descending) {
-    return sortByApiValue((item) => item.add_at, descending);
+  async function materializeNativeMenu() {
+    const button = document.querySelector('button.order-btn');
+    if (!button) return null;
+    button.dispatchEvent(new MouseEvent('mouseenter', { view: window }));
+
+    for (let i = 0; i < 40; i++) {
+      const items = Array.from(document.querySelectorAll('.menu-popover__panel-item'))
+        .filter((item) => !item.classList.contains('wl-sort-menu-item'));
+      const recent = items.find((item) => (item.textContent || '').trim() === '最近添加');
+      const earliest = items.find((item) => (item.textContent || '').trim() === '最早添加');
+      if (recent && earliest) return { recent, earliest };
+      await sleep(25);
+    }
+
+    console.error(`[${new Date().toISOString()}] [wl-sort] native order menu timeout`, {
+      timeoutMs: 1000,
+      result: 'kept current order',
+    });
+    return null;
+  }
+
+  async function sortByAddedTime(descending) {
+    const nativeItems = await materializeNativeMenu();
+    if (!nativeItems) return false;
+    const targetLabel = descending ? '最近添加' : '最早添加';
+    const target = descending ? nativeItems.recent : nativeItems.earliest;
+    target.click();
+
+    const button = document.querySelector('button.order-btn');
+    for (let i = 0; i < 40; i++) {
+      if ((button && button.textContent || '').trim().startsWith(targetLabel)) return true;
+      await sleep(25);
+    }
+
+    console.error(`[${new Date().toISOString()}] [wl-sort] native order update timeout`, {
+      targetLabel,
+      timeoutMs: 1000,
+      result: 'kept current order',
+    });
+    return false;
   }
 
   function sortByViews(descending) {
@@ -218,22 +245,23 @@
   }
 
   let sorting = false;
-  function updateSortButtons() {
-    for (const [metric, button] of sortButtons) {
+  function updateSortMenu() {
+    const button = document.querySelector('button.order-btn');
+    if (button && activeSortMetric) {
+      setButtonLabel(`${SORT_LABELS[activeSortMetric]} · ${DIRECTION_LABELS[activeSortMetric][activeSortDirection]}`);
+      button.title = `${SORT_LABELS[activeSortMetric]}：${DIRECTION_LABELS[activeSortMetric][activeSortDirection]}`;
+    }
+    for (const [metric, item] of sortMenuItems) {
       const active = metric === activeSortMetric;
-      button.classList.toggle('wl-sort-active', active);
-      button.setAttribute('aria-pressed', String(active));
-      button.title = `${SORT_LABELS[metric]}：${DIRECTION_LABELS[metric][active ? activeSortDirection : 'asc']}`;
-      if (active) button.dataset.direction = activeSortDirection;
-      else delete button.dataset.direction;
+      item.setAttribute('aria-checked', String(active));
+      item.title = `${SORT_LABELS[metric]}：${DIRECTION_LABELS[metric][active ? activeSortDirection : 'asc']}`;
     }
   }
 
   function setSortingBusy(busy) {
-    for (const button of sortButtons.values()) {
-      button.classList.toggle('wl-sort-busy', busy);
-      button.setAttribute('aria-busy', String(busy));
-    }
+    const button = document.querySelector('button.order-btn');
+    if (button) button.setAttribute('aria-busy', String(busy));
+    for (const item of sortMenuItems.values()) item.setAttribute('aria-disabled', String(busy));
   }
 
   function onSortClick(sortMetric) {
@@ -249,8 +277,7 @@
       if (!sorted) return;
       activeSortMetric = sortMetric;
       activeSortDirection = direction;
-      setButtonLabel(SORT_LABELS.added);
-      updateSortButtons();
+      updateSortMenu();
     }).catch((error) => {
       console.error(`[${new Date().toISOString()}] [wl-sort] sort failed`, {
         error,
@@ -272,33 +299,57 @@
     else btn.insertBefore(document.createTextNode(text + ' '), btn.firstChild);
   }
 
-  function buildSortButtons() {
-    if (sortButtons.size) return true;
+  function installSortMenu() {
+    const panel = document.querySelector('.menu-popover__panel');
+    if (!panel) return false;
+    const nativeItems = Array.from(panel.querySelectorAll(':scope > .menu-popover__panel-item'))
+      .filter((item) => !item.classList.contains('wl-sort-menu-item'));
+    const template = nativeItems[0];
+    if (!template) return false;
+
+    nativeItems.forEach((item) => {
+      item.hidden = true;
+      item.classList.add('wl-native-order-item');
+    });
+
+    if (!panel.querySelector('.wl-sort-menu-item')) {
+      sortMenuItems.clear();
+      for (const metric of ['added', 'views', 'duration']) {
+        const item = template.cloneNode(false);
+        item.hidden = false;
+        item.classList.remove('wl-native-order-item');
+        item.classList.add('wl-sort-menu-item');
+        item.dataset.sortMetric = metric;
+        item.setAttribute('role', 'menuitemradio');
+        item.textContent = SORT_LABELS[metric];
+        item.addEventListener('click', (event) => {
+          event.stopImmediatePropagation();
+          event.stopPropagation();
+          event.preventDefault();
+          onSortClick(metric);
+          document.querySelector('button.order-btn')
+            ?.dispatchEvent(new MouseEvent('mouseleave', { view: window }));
+        });
+        panel.appendChild(item);
+        sortMenuItems.set(metric, item);
+      }
+    } else {
+      sortMenuItems.clear();
+      panel.querySelectorAll('.wl-sort-menu-item').forEach((item) => {
+        sortMenuItems.set(item.dataset.sortMetric, item);
+      });
+    }
+    updateSortMenu();
+    return true;
+  }
+
+  function buildSortMenu() {
+    if (menuObserver) return true;
     const popover = document.querySelector('button.order-btn')?.closest('.menu-popover');
-    const addedButton = document.querySelector('button.order-btn');
-    if (!popover || !addedButton || !document.querySelector(LIST_SELECTOR)) return false;
+    if (!popover || !document.querySelector(LIST_SELECTOR)) return false;
 
-    addedButton.classList.add('wl-sort-button');
-    addedButton.dataset.sortMetric = 'added';
-
-    const viewsButton = document.createElement('button');
-    viewsButton.className = 'wl-sort-button';
-    viewsButton.dataset.sortMetric = 'views';
-    viewsButton.textContent = SORT_LABELS.views;
-    viewsButton.addEventListener('click', () => onSortClick('views'));
-
-    const durationButton = document.createElement('button');
-    durationButton.className = 'wl-sort-button';
-    durationButton.dataset.sortMetric = 'duration';
-    durationButton.textContent = SORT_LABELS.duration;
-    durationButton.addEventListener('click', () => onSortClick('duration'));
-
-    popover.after(viewsButton, durationButton);
-    sortButtons.set('added', addedButton);
-    sortButtons.set('views', viewsButton);
-    sortButtons.set('duration', durationButton);
-    setButtonLabel(SORT_LABELS.added);
-    updateSortButtons();
+    menuObserver = new MutationObserver(() => installSortMenu());
+    menuObserver.observe(popover, { childList: true, subtree: true });
     onSortClick('added');
     return true;
   }
@@ -307,39 +358,8 @@
   (function waitForButton() {
     let tries = 0;
     const timer = setInterval(() => {
-      if (buildSortButtons() || ++tries > 40) clearInterval(timer);
+      if (buildSortMenu() || ++tries > 40) clearInterval(timer);
     }, 250);
   })();
-
-  // 隐藏原生弹层,三个指标按钮显示当前方向。
-  const style = document.createElement('style');
-  style.textContent = `
-    button.order-btn .option-icon { display: none !important; }
-    .vui_popover { visibility: hidden !important; pointer-events: none !important; }
-    .wl-sort-button {
-      appearance: none;
-      border: none;
-      background: transparent;
-      padding: 6px 10px !important;
-      font-size: 14px;
-      line-height: 20px;
-      color: var(--text2, #61666d);
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .wl-sort-button:hover,
-    .wl-sort-button.wl-sort-active {
-      color: var(--brand_blue, #00aeec);
-    }
-    .wl-sort-button[data-direction]::after {
-      margin-left: 6px;
-      font-size: 12px;
-      opacity: 0.8;
-    }
-    .wl-sort-button[data-direction='asc']::after { content: '↑'; }
-    .wl-sort-button[data-direction='desc']::after { content: '↓'; }
-    .wl-sort-button.wl-sort-busy { opacity: 0.6; cursor: progress; }
-  `;
-  document.head.appendChild(style);
 
 })();
