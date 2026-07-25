@@ -43,13 +43,18 @@ CDP 连接细节(默认 profile 端口、远程调试开关)见 chrome-cdp skill
    node ~/.claude/skills/chrome-cdp/scripts/cdp.mjs list
    ```
 
-   目标页标题通常是 `Userscript update`,URL 形如 `chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/ask.html?...`。
+   URL 形如 `chrome-extension://dhdgffkkebhmkfjojejmpbldmpobfkfo/ask.html?...`。版本递增时标题通常是
+   `Userscript update`;同版本重新安装修复内容时标题是 `Userscript re-installation`。
 
-5. 在 `ask.html` target 点击 Update 按钮。当前按钮选择器:`#input_VXBkYXRlX3VuZGVmaW5lZA_bu`。用 `cdp click`,不要用 `eval ...el.click()` —— 后者常报 "Daemon failed to start"。先验证按钮存在再点:
+5. 在 `ask.html` target 点击对应按钮。Update 选择器是 `#input_VXBkYXRlX3VuZGVmaW5lZA_bu`,Reinstall
+   选择器是 `#input_UmVpbnN0YWxsX3VuZGVmaW5lZA_bu`。用 `cdp click`,不要用 `eval ...el.click()` —— 后者常报
+   "Daemon failed to start"。先根据页面 title 验证对应按钮的 value 和可见性再点:
 
    ```sh
    node ~/.claude/skills/chrome-cdp/scripts/cdp.mjs eval <ask-target> 'JSON.stringify({updateButton: (() => { const el = document.getElementById("input_VXBkYXRlX3VuZGVmaW5lZA_bu"); return el ? {id: el.id, value: el.value, visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)} : null; })()})'
    node ~/.claude/skills/chrome-cdp/scripts/cdp.mjs click <ask-target> "#input_VXBkYXRlX3VuZGVmaW5lZA_bu"
+   node ~/.claude/skills/chrome-cdp/scripts/cdp.mjs eval <ask-target> 'JSON.stringify({title: document.title, reinstallButton: (() => { const el = document.getElementById("input_UmVpbnN0YWxsX3VuZGVmaW5lZA_bu"); return el ? {id: el.id, value: el.value, visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)} : null; })()})'
+   node ~/.claude/skills/chrome-cdp/scripts/cdp.mjs click <ask-target> "#input_UmVpbnN0YWxsX3VuZGVmaW5lZA_bu"
    ```
 
 ## Validation — 运行版本与事件

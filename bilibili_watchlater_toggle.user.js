@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.23
-// @description  把 https://www.bilibili.com/watchlater/list 的“最近添加 / 最早添加”下拉菜单改成一键 toggle，并新增按时长、播放量排序
+// @version      2026.7.25
+// @description  把稍后再看排序改成添加时间、播放量、时长三个按钮，重复点击当前按钮时反转顺序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
 // @match        https://www.bilibili.com/watchlater*
@@ -16,98 +16,28 @@
   if (window._biliWatchlaterToggleRunning) return;
   window._biliWatchlaterToggleRunning = true;
 
-  const RECENT = '最近添加';
-  const EARLIEST = '最早添加';
-  const LONGEST = '从长到短';
-  const SHORTEST = '从短到长';
-  const MOST_VIEWED = '播放最多';
-  const LEAST_VIEWED = '播放最少';
+  const SORT_LABELS = {
+    added: '添加时间',
+    views: '播放量',
+    duration: '时长',
+  };
+  const DIRECTION_LABELS = {
+    added: { asc: '旧到新', desc: '新到旧' },
+    views: { asc: '少到多', desc: '多到少' },
+    duration: { asc: '短到长', desc: '长到短' },
+  };
 
-  // 按钮文字会被我们改成自定义排序标签,但 toggle 仍需要知道 Vue 真正的排序方向,
-  // 所以用 realOrderLabel 记住最近一次真实的"最近/最早"状态。
-  let realOrderLabel = RECENT;
-
-  // 当前的自定义排序状态会在点"播放全部"或具体视频时写进播放器 URL。
-  let durationSort = null;
-  let viewsSort = null;
-
-  // 思路:
-  // 1) Vue 把 panel-item 在第一次"开菜单"之前是不渲染的 — 我们在脚本加载后,
-  //    用合成事件给按钮发一次 pointerdown/up,把 Vue 的 menu 摸到 isOpen=true,
-  //    让它把 panel-item 渲染到 DOM 里。(合成 PointerEvent 在新鲜的页面能正常
-  //    触发 Vue 的 toggle handler;只有在 Vue 内部状态被弄乱后才会失效。)
-  // 2) panel-item 一直留在 DOM,我们用 CSS 让 vui_popover 永远不可见。
-  // 3) 给按钮挂 capture 阶段的 pointerdown/click 拦截,阻止 Vue 自己开关菜单 ——
-  //    这样 Vue 的 isOpen 永远停在 step-1 设的"true",不会跟我们打架。
-  // 4) 拦到点击后,看当前按钮文字,合成点对应的"另一个"panel-item — Vue 的
-  //    order 状态被切换、按钮文字随之更新、列表自动 refetch。
-
-  let synthetic = false;
-  function fire(el, type, EvtCtor, opts = {}) {
-    synthetic = true;
-    el.dispatchEvent(new EvtCtor(type, { bubbles: true, cancelable: true, view: window, ...opts }));
-    synthetic = false;
-  }
-
-  function buttonLabel(btn) {
-    const t = (btn.textContent || '').trim();
-    if (t === LONGEST || t === SHORTEST || t === MOST_VIEWED || t === LEAST_VIEWED) {
-      return realOrderLabel;
-    }
-    realOrderLabel = t.startsWith('最早') ? EARLIEST : RECENT;
-    return realOrderLabel;
-  }
-
-  function findItem(label) {
-    const items = document.querySelectorAll('.menu-popover__panel-item');
-    return Array.from(items).find((i) => (i.textContent || '').trim() === label);
-  }
-
-  function clickItem(item) {
-    fire(item, 'pointerdown', PointerEvent);
-    fire(item, 'pointerup', PointerEvent);
-    fire(item, 'click', MouseEvent);
-  }
-
-  function materializeItems() {
-    const btn = document.querySelector('button.order-btn');
-    if (!btn) return false;
-    if (document.querySelector('.menu-popover__panel-item')) return true;
-    fire(btn, 'pointerdown', PointerEvent);
-    fire(btn, 'pointerup', PointerEvent);
-    return !!document.querySelector('.menu-popover__panel-item');
-  }
+  let activeSortMetric = null;
+  let activeSortDirection = null;
+  const sortButtons = new Map();
 
   function intercept(e) {
-    if (synthetic) return;
     const btn = e.target.closest && e.target.closest('button.order-btn');
     if (!btn) return;
-
-    // 用户切回"最近/最早",自定义排序就不再生效
-    durationSort = null;
-    viewsSort = null;
-
-    const itemsExist = !!document.querySelector('.menu-popover__panel-item');
-    if (itemsExist) {
-      // 已经有 panel-item — 拦掉 Vue 的开关菜单逻辑,我们自己直接合成点 item
-      e.stopImmediatePropagation();
-      e.stopPropagation();
-      e.preventDefault();
-    }
-    // 否则放行让 Vue 打开菜单(CSS 已经把弹层盖掉,用户看不到),
-    // panel-item 渲染出来后我们再合成点对应那一项
-
-    const target = buttonLabel(btn) === RECENT ? EARLIEST : RECENT;
-    let tries = 0;
-    const tryClick = () => {
-      const item = findItem(target);
-      if (item) {
-        clickItem(item);
-        return;
-      }
-      if (++tries < 20) setTimeout(tryClick, 25);
-    };
-    tryClick();
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+    e.preventDefault();
+    onSortClick('added');
   }
 
   // 只挂 pointerdown — Vue 的 menu 是 pointerdown 触发,先于 click 处理我们就够了。
@@ -115,22 +45,24 @@
   document.addEventListener('pointerdown', intercept, true);
 
   function activeSortParam() {
-    if (durationSort) return ['wl_dur', durationSort];
-    if (viewsSort) return ['wl_views', viewsSort];
+    if (activeSortMetric === 'added') return ['wl_added', activeSortDirection];
+    if (activeSortMetric === 'duration') return ['wl_dur', activeSortDirection];
+    if (activeSortMetric === 'views') return ['wl_views', activeSortDirection];
     return null;
   }
 
   function applySortParam(url, sortParam) {
+    url.searchParams.delete('wl_added');
     url.searchParams.delete('wl_dur');
     url.searchParams.delete('wl_views');
-    url.searchParams.set(sortParam[0], sortParam[1]);
+    if (sortParam) url.searchParams.set(sortParam[0], sortParam[1]);
   }
 
   // 自定义排序状态下点"播放全部":拦掉原生跳转,改成跳到播放器并把排序写进 URL。
   // 列表 DOM 已经重排过,第一个 card 就是要先播的视频,用它的封面链接做起点。
   document.addEventListener('click', (e) => {
     const sortParam = activeSortParam();
-    if (!sortParam) return;
+    if (!activeSortMetric) return;
     const btn = e.target.closest && e.target.closest('button.action-btn');
     if (!btn || !/播放全部/.test(btn.textContent || '')) return;
     const first = document.querySelector(`${LIST_SELECTOR} ${CARD_SELECTOR} a.bili-cover-card`);
@@ -148,18 +80,17 @@
   // 封面链接通常 target=_blank,所以这里只改写 href、不拦截默认行为。
   document.addEventListener('click', (e) => {
     const sortParam = activeSortParam();
-    if (!sortParam) return;
+    if (!activeSortMetric) return;
     const a = e.target.closest && e.target.closest('a[href*="watchlater"]');
     if (!a) return;
     const raw = a.getAttribute('href') || '';
     if (!/[?&]bvid=/.test(raw)) return; // 只处理指向具体视频的播放链接
     const u = new URL(raw.startsWith('//') ? location.protocol + raw : raw, location.origin);
-    if (u.searchParams.get(sortParam[0]) === sortParam[1]) return; // 已经带上了
     applySortParam(u, sortParam);
     a.setAttribute('href', u.toString());
   }, true);
 
-  // ---- 自定义排序:鼠标悬浮排序按钮时额外弹出菜单 ----
+  // ---- 自定义排序 ----
   // 稍后再看列表由 Vue 渲染,但直接重排 section 下的 card DOM 节点能稳定保留
   // (Vue 不会把我们的顺序刷回去)。选择时长或播放量排序时:
   // 持续滚到底把所有视频懒加载出来(直到出现"已经探索到底了～"),重排后滚回顶部。
@@ -237,7 +168,7 @@
     return match ? match[1] : null;
   }
 
-  async function loadViewCounts() {
+  async function loadApiItems() {
     try {
       const response = await fetch(API_URL, { credentials: 'include' });
       const json = await response.json();
@@ -248,12 +179,9 @@
         });
         return null;
       }
-      return new Map(list.map((item) => [
-        item.bvid,
-        item.arc_info && item.arc_info.stat && item.arc_info.stat.view,
-      ]));
+      return list;
     } catch (error) {
-      console.error(`[${new Date().toISOString()}] [wl-sort] fetch view counts failed`, {
+      console.error(`[${new Date().toISOString()}] [wl-sort] fetch toview list failed`, {
         error,
         result: 'kept original order',
       });
@@ -261,15 +189,16 @@
     }
   }
 
-  async function sortByViews(descending) {
+  async function sortByApiValue(getValue, descending) {
     const sec = document.querySelector(LIST_SELECTOR);
     if (!sec) return false;
-    const [, viewCounts] = await Promise.all([loadAll(), loadViewCounts()]);
-    if (!viewCounts) return false;
+    const [, apiItems] = await Promise.all([loadAll(), loadApiItems()]);
+    if (!apiItems) return false;
+    const values = new Map(apiItems.map((item) => [item.bvid, getValue(item)]));
     const list = cards();
     sortCards(list, (card) => {
-      const views = viewCounts.get(cardBvid(card));
-      return typeof views === 'number' ? views : null;
+      const value = values.get(cardBvid(card));
+      return typeof value === 'number' ? value : null;
     }, descending);
     list.forEach((card) => sec.appendChild(card));
     const el = document.scrollingElement || document.documentElement;
@@ -277,23 +206,51 @@
     return true;
   }
 
+  function sortByAddedTime(descending) {
+    return sortByApiValue((item) => item.add_at, descending);
+  }
+
+  function sortByViews(descending) {
+    return sortByApiValue(
+      (item) => item.arc_info && item.arc_info.stat && item.arc_info.stat.view,
+      descending,
+    );
+  }
+
   let sorting = false;
-  function onSortClick(sortMetric, descending, menu) {
+  function updateSortButtons() {
+    for (const [metric, button] of sortButtons) {
+      const active = metric === activeSortMetric;
+      button.classList.toggle('wl-sort-active', active);
+      button.setAttribute('aria-pressed', String(active));
+      button.title = `${SORT_LABELS[metric]}：${DIRECTION_LABELS[metric][active ? activeSortDirection : 'asc']}`;
+      if (active) button.dataset.direction = activeSortDirection;
+      else delete button.dataset.direction;
+    }
+  }
+
+  function setSortingBusy(busy) {
+    for (const button of sortButtons.values()) {
+      button.classList.toggle('wl-sort-busy', busy);
+      button.setAttribute('aria-busy', String(busy));
+    }
+  }
+
+  function onSortClick(sortMetric) {
     if (sorting) return;
+    const direction = activeSortMetric === sortMetric && activeSortDirection === 'asc' ? 'desc' : 'asc';
+    const descending = direction === 'desc';
     sorting = true;
-    menu.classList.add('wl-dur-menu--busy');
-    const sort = sortMetric === 'views' ? sortByViews : sortByDuration;
+    setSortingBusy(true);
+    const sort = sortMetric === 'added'
+      ? sortByAddedTime
+      : sortMetric === 'views' ? sortByViews : sortByDuration;
     sort(descending).then((sorted) => {
       if (!sorted) return;
-      if (sortMetric === 'views') {
-        setButtonLabel(descending ? MOST_VIEWED : LEAST_VIEWED);
-        viewsSort = descending ? 'desc' : 'asc';
-        durationSort = null;
-      } else {
-        setButtonLabel(descending ? LONGEST : SHORTEST);
-        durationSort = descending ? 'desc' : 'asc';
-        viewsSort = null;
-      }
+      activeSortMetric = sortMetric;
+      activeSortDirection = direction;
+      setButtonLabel(SORT_LABELS.added);
+      updateSortButtons();
     }).catch((error) => {
       console.error(`[${new Date().toISOString()}] [wl-sort] sort failed`, {
         error,
@@ -302,7 +259,7 @@
       });
     }).finally(() => {
       sorting = false;
-      menu.classList.remove('wl-dur-menu--busy');
+      setSortingBusy(false);
     });
   }
 
@@ -315,39 +272,34 @@
     else btn.insertBefore(document.createTextNode(text + ' '), btn.firstChild);
   }
 
-  function buildMenu() {
+  function buildSortButtons() {
+    if (sortButtons.size) return true;
     const popover = document.querySelector('button.order-btn')?.closest('.menu-popover');
-    if (!popover || popover.querySelector('.wl-dur-menu')) return !!popover;
-    popover.classList.add('wl-dur-anchor');
+    const addedButton = document.querySelector('button.order-btn');
+    if (!popover || !addedButton || !document.querySelector(LIST_SELECTOR)) return false;
 
-    const menu = document.createElement('div');
-    menu.className = 'wl-dur-menu';
+    addedButton.classList.add('wl-sort-button');
+    addedButton.dataset.sortMetric = 'added';
 
-    const shortBtn = document.createElement('button');
-    shortBtn.className = 'wl-dur-item';
-    shortBtn.textContent = '从短到长';
-    shortBtn.addEventListener('click', () => onSortClick('duration', false, menu));
+    const viewsButton = document.createElement('button');
+    viewsButton.className = 'wl-sort-button';
+    viewsButton.dataset.sortMetric = 'views';
+    viewsButton.textContent = SORT_LABELS.views;
+    viewsButton.addEventListener('click', () => onSortClick('views'));
 
-    const longBtn = document.createElement('button');
-    longBtn.className = 'wl-dur-item';
-    longBtn.textContent = '从长到短';
-    longBtn.addEventListener('click', () => onSortClick('duration', true, menu));
+    const durationButton = document.createElement('button');
+    durationButton.className = 'wl-sort-button';
+    durationButton.dataset.sortMetric = 'duration';
+    durationButton.textContent = SORT_LABELS.duration;
+    durationButton.addEventListener('click', () => onSortClick('duration'));
 
-    const leastViewedBtn = document.createElement('button');
-    leastViewedBtn.className = 'wl-dur-item';
-    leastViewedBtn.textContent = LEAST_VIEWED;
-    leastViewedBtn.addEventListener('click', () => onSortClick('views', false, menu));
-
-    const mostViewedBtn = document.createElement('button');
-    mostViewedBtn.className = 'wl-dur-item';
-    mostViewedBtn.textContent = MOST_VIEWED;
-    mostViewedBtn.addEventListener('click', () => onSortClick('views', true, menu));
-
-    menu.appendChild(shortBtn);
-    menu.appendChild(longBtn);
-    menu.appendChild(leastViewedBtn);
-    menu.appendChild(mostViewedBtn);
-    popover.appendChild(menu);
+    popover.after(viewsButton, durationButton);
+    sortButtons.set('added', addedButton);
+    sortButtons.set('views', viewsButton);
+    sortButtons.set('duration', durationButton);
+    setButtonLabel(SORT_LABELS.added);
+    updateSortButtons();
+    onSortClick('added');
     return true;
   }
 
@@ -355,60 +307,38 @@
   (function waitForButton() {
     let tries = 0;
     const timer = setInterval(() => {
-      if (buildMenu() || ++tries > 40) clearInterval(timer);
+      if (buildSortButtons() || ++tries > 40) clearInterval(timer);
     }, 250);
   })();
 
-  // 视觉:隐下拉箭头 + toggle 标识 + 把原生弹层彻底盖掉(panel-item 仍在 DOM 里可被合成 click)
-  // 以及自定义的时长排序悬浮菜单
+  // 隐藏原生弹层,三个指标按钮显示当前方向。
   const style = document.createElement('style');
   style.textContent = `
     button.order-btn .option-icon { display: none !important; }
-    button.order-btn { padding-right: 12px !important; }
-    button.order-btn::after {
-      content: '⇄';
-      margin-left: 6px;
-      font-size: 12px;
-      opacity: 0.6;
-    }
     .vui_popover { visibility: hidden !important; pointer-events: none !important; }
-
-    .menu-popover.wl-dur-anchor { position: relative; }
-    .wl-dur-menu {
-      position: absolute;
-      top: 100%;
-      right: 0;
-      margin-top: 0;
-      padding: 4px;
-      display: none;
-      flex-direction: column;
-      min-width: 100px;
-      background: var(--bg1_float, #fff);
-      border: 1px solid var(--line_regular, #e3e5e7);
-      border-radius: 12px;
-      box-shadow: 0 8px 40px 0 rgba(0, 0, 0, 0.1);
-      z-index: 10000;
-    }
-    .menu-popover.wl-dur-anchor:hover .wl-dur-menu { display: flex; }
-    .wl-dur-item {
+    .wl-sort-button {
       appearance: none;
       border: none;
       background: transparent;
-      padding: 8px 16px;
-      border-radius: 8px;
-      font-size: 13px;
-      line-height: 1.4;
+      padding: 6px 10px !important;
+      font-size: 14px;
+      line-height: 20px;
       color: var(--text2, #61666d);
-      text-align: left;
       cursor: pointer;
       white-space: nowrap;
     }
-    .wl-dur-item:hover {
-      background: var(--graph_bg_regular, #f1f2f3);
+    .wl-sort-button:hover,
+    .wl-sort-button.wl-sort-active {
       color: var(--brand_blue, #00aeec);
     }
-    .wl-dur-menu--busy { opacity: 0.6; pointer-events: none; }
-    .wl-dur-menu--busy .wl-dur-item { cursor: progress; }
+    .wl-sort-button[data-direction]::after {
+      margin-left: 6px;
+      font-size: 12px;
+      opacity: 0.8;
+    }
+    .wl-sort-button[data-direction='asc']::after { content: '↑'; }
+    .wl-sort-button[data-direction='desc']::after { content: '↓'; }
+    .wl-sort-button.wl-sort-busy { opacity: 0.6; cursor: progress; }
   `;
   document.head.appendChild(style);
 
