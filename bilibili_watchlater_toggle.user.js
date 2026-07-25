@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.25.1
-// @description  在原生排序菜单中提供添加时间、播放量、时长三项，重复点击当前项时反转顺序
+// @version      2026.7.25.2
+// @description  主按钮显示当前排序，悬浮菜单提供另外两项，点击主按钮时反转顺序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
 // @match        https://www.bilibili.com/watchlater*
@@ -222,19 +222,8 @@
     const targetLabel = descending ? '最近添加' : '最早添加';
     const target = descending ? nativeItems.recent : nativeItems.earliest;
     target.click();
-
-    const button = document.querySelector('button.order-btn');
-    for (let i = 0; i < 40; i++) {
-      if ((button && button.textContent || '').trim().startsWith(targetLabel)) return true;
-      await sleep(25);
-    }
-
-    console.error(`[${new Date().toISOString()}] [wl-sort] native order update timeout`, {
-      targetLabel,
-      timeoutMs: 1000,
-      result: 'kept current order',
-    });
-    return false;
+    await sleep(0);
+    return true;
   }
 
   function sortByViews(descending) {
@@ -248,11 +237,13 @@
   function updateSortMenu() {
     const button = document.querySelector('button.order-btn');
     if (button && activeSortMetric) {
-      setButtonLabel(`${SORT_LABELS[activeSortMetric]} · ${DIRECTION_LABELS[activeSortMetric][activeSortDirection]}`);
+      setButtonLabel(SORT_LABELS[activeSortMetric]);
       button.title = `${SORT_LABELS[activeSortMetric]}：${DIRECTION_LABELS[activeSortMetric][activeSortDirection]}`;
+      button.setAttribute('aria-label', button.title);
     }
     for (const [metric, item] of sortMenuItems) {
       const active = metric === activeSortMetric;
+      item.hidden = active;
       item.setAttribute('aria-checked', String(active));
       item.title = `${SORT_LABELS[metric]}：${DIRECTION_LABELS[metric][active ? activeSortDirection : 'asc']}`;
     }
@@ -268,17 +259,28 @@
     if (sorting) return;
     const direction = activeSortMetric === sortMetric && activeSortDirection === 'asc' ? 'desc' : 'asc';
     const descending = direction === 'desc';
+    const previousMetric = activeSortMetric;
+    const previousDirection = activeSortDirection;
+    activeSortMetric = sortMetric;
+    activeSortDirection = direction;
     sorting = true;
+    updateSortMenu();
     setSortingBusy(true);
     const sort = sortMetric === 'added'
       ? sortByAddedTime
       : sortMetric === 'views' ? sortByViews : sortByDuration;
     sort(descending).then((sorted) => {
-      if (!sorted) return;
-      activeSortMetric = sortMetric;
-      activeSortDirection = direction;
+      if (sorted) {
+        updateSortMenu();
+        return;
+      }
+      activeSortMetric = previousMetric;
+      activeSortDirection = previousDirection;
       updateSortMenu();
     }).catch((error) => {
+      activeSortMetric = previousMetric;
+      activeSortDirection = previousDirection;
+      updateSortMenu();
       console.error(`[${new Date().toISOString()}] [wl-sort] sort failed`, {
         error,
         sortMetric,
@@ -297,6 +299,22 @@
     const node = Array.from(btn.childNodes).find((n) => n.nodeType === Node.TEXT_NODE);
     if (node) node.nodeValue = text + ' ';
     else btn.insertBefore(document.createTextNode(text + ' '), btn.firstChild);
+  }
+
+  function installCurrentButtonHandler() {
+    const button = document.querySelector('button.order-btn');
+    if (!button) return false;
+    if (button.dataset.wlSortClickInstalled === 'true') return true;
+    button.dataset.wlSortClickInstalled = 'true';
+    button.addEventListener('click', (event) => {
+      if (!activeSortMetric) return;
+      event.stopImmediatePropagation();
+      event.stopPropagation();
+      event.preventDefault();
+      onSortClick(activeSortMetric);
+      button.dispatchEvent(new MouseEvent('mouseleave', { view: window }));
+    }, true);
+    return true;
   }
 
   function installSortMenu() {
@@ -348,9 +366,16 @@
     const popover = document.querySelector('button.order-btn')?.closest('.menu-popover');
     if (!popover || !document.querySelector(LIST_SELECTOR)) return false;
 
-    menuObserver = new MutationObserver(() => installSortMenu());
+    installCurrentButtonHandler();
+    menuObserver = new MutationObserver(() => {
+      installCurrentButtonHandler();
+      installSortMenu();
+    });
     menuObserver.observe(popover, { childList: true, subtree: true });
-    onSortClick('added');
+    // 默认只展示播放量升序状态,不在刷新时启动全量加载或滚动。
+    activeSortMetric = 'views';
+    activeSortDirection = 'asc';
+    updateSortMenu();
     return true;
   }
 
