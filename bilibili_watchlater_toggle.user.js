@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.25.2
+// @version      2026.7.27.1
 // @description  主按钮显示当前排序，悬浮菜单提供另外两项，点击主按钮时反转顺序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
@@ -372,9 +372,8 @@
       installSortMenu();
     });
     menuObserver.observe(popover, { childList: true, subtree: true });
-    // 默认只展示播放量升序状态,不在刷新时启动全量加载或滚动。
-    activeSortMetric = 'views';
-    activeSortDirection = 'asc';
+    activeSortMetric = 'added';
+    activeSortDirection = 'desc';
     updateSortMenu();
     return true;
   }
