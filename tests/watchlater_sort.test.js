@@ -233,12 +233,10 @@ test('player keeps the current item visible as the playlist changes', async () =
     { block: 'nearest', behavior: 'instant', id: 'next' },
   ]);
 
+  const scrollCount = harness.scrollCalls.length;
   harness.remove('previous');
   await settle();
-  assert.deepEqual(harness.scrollCalls.slice(-2), [
-    { block: 'nearest', behavior: 'instant', id: 'next' },
-    { block: 'nearest', behavior: 'instant', id: 'next' },
-  ]);
+  assert.equal(harness.scrollCalls.length, scrollCount);
 
   harness.remove('next');
   harness.activate('current');

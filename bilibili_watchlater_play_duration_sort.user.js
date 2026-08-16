@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.8.16.1
+// @version      2026.8.16.2
 // @description  根据 URL 参数 wl_added、wl_dur 或 wl_views 对稍后再看播放器的播放列表排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
@@ -107,7 +107,7 @@
 
   /**
    * @param {Element} content
-   * @returns {{ active: Element | null, count: number, index: number }}
+   * @returns {{ active: Element | null, key: string | null }}
    */
   function currentListState(content) {
     const items = Array.from(content.querySelectorAll(LIST_ITEM_SELECTOR));
@@ -117,8 +117,7 @@
     const active = markedItem || items.find((item) => item.dataset.key === currentBvid) || null;
     return {
       active,
-      count: items.length,
-      index: items.indexOf(active),
+      key: active ? active.dataset.key : null,
     };
   }
 
@@ -195,13 +194,9 @@
 
     const observer = new MutationObserver(() => {
       const nextState = currentListState(content);
-      if (
-        nextState.active === previousState.active &&
-        nextState.count === previousState.count &&
-        nextState.index === previousState.index
-      ) return;
+      if (nextState.key === previousState.key) return;
       previousState = nextState;
-      scheduleAlignment('playlist changed');
+      scheduleAlignment('current item changed');
     });
     observer.observe(content, {
       attributeFilter: ['class'],
