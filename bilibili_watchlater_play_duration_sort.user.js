@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.8.16
+// @version      2026.8.16.1
 // @description  根据 URL 参数 wl_added、wl_dur 或 wl_views 对稍后再看播放器的播放列表排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
@@ -45,8 +45,8 @@
   const API_URL =
     'https://api.bilibili.com/x/v2/medialist/toview/web' +
     '?out_referer=&mobi_app=web&ps=1000&desc=false&sort_field=1&web_location=333.1245';
-  const LIST_ITEM_SELECTOR = '.singlep-list-item-inner';
-  const CURRENT_ITEM_SELECTOR = `${LIST_ITEM_SELECTOR}.siglep-active`;
+  const LIST_ITEM_SELECTOR = '.action-list-item-wrap[data-key]';
+  const CURRENT_MARKER_SELECTOR = '.singlep-list-item-inner.siglep-active, .multip-list-item-active';
   // A 2026-08-16 Chrome CDP trace showed Bilibili's native smooth scroll settling in about 500ms.
   const SCROLL_SETTLE_MS = 800;
 
@@ -111,7 +111,10 @@
    */
   function currentListState(content) {
     const items = Array.from(content.querySelectorAll(LIST_ITEM_SELECTOR));
-    const active = content.querySelector(CURRENT_ITEM_SELECTOR);
+    const marker = content.querySelector(CURRENT_MARKER_SELECTOR);
+    const markedItem = marker && marker.closest(LIST_ITEM_SELECTOR);
+    const currentBvid = new URLSearchParams(location.search).get('bvid');
+    const active = markedItem || items.find((item) => item.dataset.key === currentBvid) || null;
     return {
       active,
       count: items.length,
@@ -127,7 +130,7 @@
    * @returns {void}
    */
   function alignCurrentItem(content, phase, reason, traceId) {
-    const active = content.querySelector(CURRENT_ITEM_SELECTOR);
+    const { active } = currentListState(content);
     if (!active) {
       console.debug(`[${new Date().toISOString()}] [wl-sort] current item alignment completed`, {
         phase,

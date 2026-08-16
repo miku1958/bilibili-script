@@ -74,6 +74,7 @@ function settle() {
 }
 
 /**
+ * @param {{ hasActiveMarker?: boolean }} [options]
  * @returns {{
  *   MutationObserver: typeof MutationObserver,
  *   activate: (id: string) => void,
@@ -82,22 +83,27 @@ function settle() {
  *   scrollCalls: Array<{ block: string, behavior: string, id: string }>,
  * }}
  */
-function createPlayerListHarness() {
+function createPlayerListHarness({ hasActiveMarker = true } = {}) {
   let observerCallback = null;
   const scrollCalls = [];
-  const listItems = ['previous', 'current', 'next'].map((id) => ({
-    active: id === 'current',
-    id,
-    scrollIntoView(options) {
-      scrollCalls.push({
-        block: options.block,
-        behavior: options.behavior,
-        id,
-      });
-    },
-  }));
+  const listItems = ['previous', 'current', 'next'].map((id) => {
+    const item = {
+      active: id === 'current',
+      dataset: { key: id },
+      id,
+      closest: () => item,
+      scrollIntoView(options) {
+        scrollCalls.push({
+          block: options.block,
+          behavior: options.behavior,
+          id,
+        });
+      },
+    };
+    return item;
+  });
   const content = {
-    querySelector: () => listItems.find((item) => item.active) || null,
+    querySelector: () => hasActiveMarker ? listItems.find((item) => item.active) || null : null,
     querySelectorAll: () => listItems.slice(),
   };
   class MutationObserverMock {
@@ -112,6 +118,7 @@ function createPlayerListHarness() {
   return {
     MutationObserver: MutationObserverMock,
     activate(id) {
+      hasActiveMarker = true;
       listItems.forEach((item) => {
         item.active = item.id === id;
       });
@@ -237,6 +244,15 @@ test('player keeps the current item visible as the playlist changes', async () =
   harness.activate('current');
   await settle();
   assert.deepEqual(harness.scrollCalls.slice(-2), [
+    { block: 'nearest', behavior: 'instant', id: 'current' },
+    { block: 'nearest', behavior: 'instant', id: 'current' },
+  ]);
+});
+
+test('player locates a multipart current item by its URL bvid', async () => {
+  const harness = createPlayerListHarness({ hasActiveMarker: false });
+  await runPlayer('?bvid=current&wl_views=asc', apiItems, harness);
+  assert.deepEqual(harness.scrollCalls, [
     { block: 'nearest', behavior: 'instant', id: 'current' },
     { block: 'nearest', behavior: 'instant', id: 'current' },
   ]);
