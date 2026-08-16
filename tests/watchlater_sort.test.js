@@ -73,13 +73,71 @@ function settle() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-async function runPlayer(search, items = apiItems) {
+/**
+ * @returns {{
+ *   MutationObserver: typeof MutationObserver,
+ *   activate: (id: string) => void,
+ *   document: object,
+ *   remove: (id: string) => void,
+ *   scrollCalls: Array<{ block: string, behavior: string, id: string }>,
+ * }}
+ */
+function createPlayerListHarness() {
+  let observerCallback = null;
+  const scrollCalls = [];
+  const listItems = ['previous', 'current', 'next'].map((id) => ({
+    active: id === 'current',
+    id,
+    scrollIntoView(options) {
+      scrollCalls.push({
+        block: options.block,
+        behavior: options.behavior,
+        id,
+      });
+    },
+  }));
+  const content = {
+    querySelector: () => listItems.find((item) => item.active) || null,
+    querySelectorAll: () => listItems.slice(),
+  };
+  class MutationObserverMock {
+    constructor(callback) {
+      observerCallback = callback;
+    }
+
+    observe(target) {
+      assert.equal(target, content);
+    }
+  }
+  return {
+    MutationObserver: MutationObserverMock,
+    activate(id) {
+      listItems.forEach((item) => {
+        item.active = item.id === id;
+      });
+      observerCallback?.([]);
+    },
+    document: {
+      readyState: 'complete',
+      querySelector: (selector) => selector === '.action-list-content' ? content : null,
+    },
+    remove(id) {
+      const index = listItems.findIndex((item) => item.id === id);
+      listItems.splice(index, 1);
+      observerCallback?.([]);
+    },
+    scrollCalls,
+  };
+}
+
+async function runPlayer(search, items = apiItems, listHarness = null) {
   let fetchCalls = 0;
   const resourceList = [{ bvid: 'ORIGINAL' }];
   const sandbox = {
+    MutationObserver: listHarness?.MutationObserver,
     URLSearchParams,
     console,
-    document: { readyState: 'complete' },
+    document: listHarness?.document || { readyState: 'complete' },
     fetch: async () => {
       fetchCalls += 1;
       return { json: async () => ({ data: { list: items } }) };
@@ -150,6 +208,37 @@ test('player sorts the full queue by views and preserves duration sorting', asyn
   assert.deepEqual((await runPlayer('?wl_dur=desc', [missingDuration, apiItems[0]])).bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_DURATION',
+  ]);
+});
+
+test('player keeps the current item visible as the playlist changes', async () => {
+  const harness = createPlayerListHarness();
+  await runPlayer('?wl_dur=asc', apiItems, harness);
+  assert.deepEqual(harness.scrollCalls, [
+    { block: 'nearest', behavior: 'instant', id: 'current' },
+    { block: 'nearest', behavior: 'instant', id: 'current' },
+  ]);
+
+  harness.activate('next');
+  await settle();
+  assert.deepEqual(harness.scrollCalls.slice(-2), [
+    { block: 'nearest', behavior: 'instant', id: 'next' },
+    { block: 'nearest', behavior: 'instant', id: 'next' },
+  ]);
+
+  harness.remove('previous');
+  await settle();
+  assert.deepEqual(harness.scrollCalls.slice(-2), [
+    { block: 'nearest', behavior: 'instant', id: 'next' },
+    { block: 'nearest', behavior: 'instant', id: 'next' },
+  ]);
+
+  harness.remove('next');
+  harness.activate('current');
+  await settle();
+  assert.deepEqual(harness.scrollCalls.slice(-2), [
+    { block: 'nearest', behavior: 'instant', id: 'current' },
+    { block: 'nearest', behavior: 'instant', id: 'current' },
   ]);
 });
 

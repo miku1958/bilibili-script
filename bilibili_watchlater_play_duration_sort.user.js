@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.25
+// @version      2026.8.16
 // @description  根据 URL 参数 wl_added、wl_dur 或 wl_views 对稍后再看播放器的播放列表排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
@@ -45,6 +45,10 @@
   const API_URL =
     'https://api.bilibili.com/x/v2/medialist/toview/web' +
     '?out_referer=&mobi_app=web&ps=1000&desc=false&sort_field=1&web_location=333.1245';
+  const LIST_ITEM_SELECTOR = '.singlep-list-item-inner';
+  const CURRENT_ITEM_SELECTOR = `${LIST_ITEM_SELECTOR}.siglep-active`;
+  // A 2026-08-16 Chrome CDP trace showed Bilibili's native smooth scroll settling in about 500ms.
+  const SCROLL_SETTLE_MS = 800;
 
   function arcDuration(item) {
     const d = item && item.arc_info && item.arc_info.duration;
@@ -101,6 +105,110 @@
     return s && Array.isArray(s.resourceList) ? s.resourceList : null;
   }
 
+  /**
+   * @param {Element} content
+   * @returns {{ active: Element | null, count: number, index: number }}
+   */
+  function currentListState(content) {
+    const items = Array.from(content.querySelectorAll(LIST_ITEM_SELECTOR));
+    const active = content.querySelector(CURRENT_ITEM_SELECTOR);
+    return {
+      active,
+      count: items.length,
+      index: items.indexOf(active),
+    };
+  }
+
+  /**
+   * @param {Element} content
+   * @param {string} phase
+   * @param {string} reason
+   * @param {string} traceId
+   * @returns {void}
+   */
+  function alignCurrentItem(content, phase, reason, traceId) {
+    const active = content.querySelector(CURRENT_ITEM_SELECTOR);
+    if (!active) {
+      console.debug(`[${new Date().toISOString()}] [wl-sort] current item alignment completed`, {
+        phase,
+        reason,
+        result: 'active item unavailable',
+        traceId,
+      });
+      return;
+    }
+    active.scrollIntoView({ behavior: 'instant', block: 'nearest', inline: 'nearest' });
+    console.debug(`[${new Date().toISOString()}] [wl-sort] current item alignment completed`, {
+      phase,
+      reason,
+      result: 'aligned',
+      traceId,
+    });
+  }
+
+  /**
+   * @returns {void}
+   */
+  function installCurrentItemAlignment() {
+    if (typeof document.querySelector !== 'function') return;
+    const content = document.querySelector('.action-list-content');
+    if (!content) {
+      console.error(`[${new Date().toISOString()}] [wl-sort] current item observer unavailable`, {
+        result: 'playlist content not found',
+      });
+      return;
+    }
+
+    let alignmentGeneration = 0;
+    let alignmentSequence = 0;
+    let previousState = currentListState(content);
+
+    /**
+     * @param {string} reason
+     * @returns {void}
+     */
+    function scheduleAlignment(reason) {
+      const generation = ++alignmentGeneration;
+      const traceId = `wl-scroll-${Date.now()}-${++alignmentSequence}`;
+      console.debug(`[${new Date().toISOString()}] [wl-sort] current item alignment scheduled`, {
+        delayMs: SCROLL_SETTLE_MS,
+        reason,
+        traceId,
+      });
+      alignCurrentItem(content, 'immediate', reason, traceId);
+      setTimeout(() => {
+        if (generation !== alignmentGeneration) {
+          console.debug(`[${new Date().toISOString()}] [wl-sort] current item alignment completed`, {
+            phase: 'settled',
+            reason,
+            result: 'superseded',
+            traceId,
+          });
+          return;
+        }
+        alignCurrentItem(content, 'settled', reason, traceId);
+      }, SCROLL_SETTLE_MS);
+    }
+
+    const observer = new MutationObserver(() => {
+      const nextState = currentListState(content);
+      if (
+        nextState.active === previousState.active &&
+        nextState.count === previousState.count &&
+        nextState.index === previousState.index
+      ) return;
+      previousState = nextState;
+      scheduleAlignment('playlist changed');
+    });
+    observer.observe(content, {
+      attributeFilter: ['class'],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    scheduleAlignment('initial sort');
+  }
+
   async function loadAllAndSort() {
     // 等播放器把初始队列建好(resourceList 挂上且有内容)
     for (let i = 0; i < 60 && !(currentResourceList() && currentResourceList().length); i++) {
@@ -144,6 +252,7 @@
       }
       await sleep(400);
     }
+    installCurrentItemAlignment();
   }
 
   if (document.readyState === 'loading') {
