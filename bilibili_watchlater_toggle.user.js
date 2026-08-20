@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.7.27.1
+// @version      2026.8.20.1
 // @description  主按钮显示当前排序，悬浮菜单提供另外两项，点击主按钮时反转顺序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
@@ -94,18 +94,6 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  // 时长文字形如 "MM:SS" 或 "HH:MM:SS"。看过的视频会显示 "已看进度/总时长"(如 "16:52/56:01"),
-  // 总时长是最后一个时间戳,所以取所有 stat 里最后一个符合时间格式的 token。
-  function durationSeconds(card) {
-    const text = Array.from(card.querySelectorAll('.bili-cover-card__stat'))
-      .map((s) => (s.textContent || '').trim())
-      .join(' ');
-    const matches = text.match(/\d{1,3}(?::\d{2})+/g);
-    if (!matches || matches.length === 0) return null;
-    const last = matches[matches.length - 1];
-    return last.split(':').reduce((acc, n) => acc * 60 + parseInt(n, 10), 0);
-  }
-
   function cards() {
     const sec = document.querySelector(LIST_SELECTOR);
     if (!sec) return [];
@@ -125,18 +113,6 @@
       el.scrollTo(0, el.scrollHeight);
       await sleep(300);
     }
-  }
-
-  async function sortByDuration(descending) {
-    const sec = document.querySelector(LIST_SELECTOR);
-    if (!sec) return false;
-    await loadAll();
-    const list = cards();
-    sortCards(list, durationSeconds, descending);
-    list.forEach((c) => sec.appendChild(c));
-    const el = document.scrollingElement || document.documentElement;
-    el.scrollTo({ top: 0, behavior: 'smooth' });
-    return true;
   }
 
   function sortCards(list, getValue, descending) {
@@ -229,6 +205,13 @@
   function sortByViews(descending) {
     return sortByApiValue(
       (item) => item.arc_info && item.arc_info.stat && item.arc_info.stat.view,
+      descending,
+    );
+  }
+
+  function sortByDuration(descending) {
+    return sortByApiValue(
+      (item) => item.arc_info && item.arc_info.duration,
       descending,
     );
   }

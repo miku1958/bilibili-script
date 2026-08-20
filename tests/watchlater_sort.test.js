@@ -358,7 +358,7 @@ function formatDuration(seconds) {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function createCard(apiItem) {
+function createCard(apiItem, includeDurationStat = true) {
   const bvid = apiItem.bvid;
   const link = {
     getAttribute: () => `/list/watchlater?bvid=${bvid}`,
@@ -367,7 +367,7 @@ function createCard(apiItem) {
     bvid,
     querySelector: (selector) => selector.includes('bvid=') ? link : null,
     querySelectorAll: (selector) => selector === '.bili-cover-card__stat'
-      ? [{ textContent: formatDuration(apiItem.arc_info.duration) }]
+      ? includeDurationStat ? [{ textContent: formatDuration(apiItem.arc_info.duration) }] : []
       : [],
   };
 }
@@ -376,7 +376,7 @@ async function flushAsyncWork() {
   for (let i = 0; i < 4; i++) await settle();
 }
 
-async function createToggleHarness() {
+async function createToggleHarness({ includeDurationStats = true, items = apiItems } = {}) {
   const documentListeners = new Map();
   const orderLabel = { nodeType: 3, nodeValue: '最近添加 ' };
   const sortContainer = createElement('div');
@@ -387,8 +387,10 @@ async function createToggleHarness() {
   orderButton.closest = () => popover;
   popover.appendChild(orderButton);
 
-  const cardsByBvid = new Map(apiItems.map((item) => [item.bvid, createCard(item)]));
-  const addedAscending = apiItems
+  const cardsByBvid = new Map(
+    items.map((item) => [item.bvid, createCard(item, includeDurationStats)]),
+  );
+  const addedAscending = items
     .slice()
     .sort((left, right) => left.add_at - right.add_at)
     .map((item) => cardsByBvid.get(item.bvid));
@@ -412,7 +414,7 @@ async function createToggleHarness() {
 
   orderButton.addEventListener('mouseenter', () => {
     if (panel) return;
-    const addedAscending = apiItems
+    const addedAscending = items
       .slice()
       .sort((left, right) => left.add_at - right.add_at)
       .map((item) => cardsByBvid.get(item.bvid));
@@ -482,7 +484,7 @@ async function createToggleHarness() {
     document,
     fetch: async () => {
       fetchCalls += 1;
-      return { json: async () => ({ data: { list: apiItems } }) };
+      return { json: async () => ({ data: { list: items } }) };
     },
     location: {
       origin: 'https://www.bilibili.com',
@@ -572,6 +574,22 @@ async function createToggleHarness() {
 function activeControl(state) {
   return state.controls.find((control) => control.active);
 }
+
+test('duration sorting uses API values before card stats render', async () => {
+  const items = [
+    { ...apiItems[0], bvid: 'BV1fuEV6EES9', add_at: 300, arc_info: { ...apiItems[0].arc_info, duration: 1030 } },
+    { ...apiItems[1], bvid: 'BV113bh6TEfb', add_at: 200, arc_info: { ...apiItems[1].arc_info, duration: 8131 } },
+    { ...apiItems[2], bvid: 'BV1cbui6aEaa', add_at: 100, arc_info: { ...apiItems[2].arc_info, duration: 705 } },
+  ];
+  const harness = await createToggleHarness({ includeDurationStats: false, items });
+
+  await harness.chooseMenu('duration');
+  assert.deepEqual(harness.state().bvids, [
+    'BV1cbui6aEaa',
+    'BV1fuEV6EES9',
+    'BV113bh6TEfb',
+  ]);
+});
 
 test('refresh reflects native added order and keeps the other metrics in the menu', async () => {
   const harness = await createToggleHarness();
