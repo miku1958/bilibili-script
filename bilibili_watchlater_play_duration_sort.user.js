@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看播放页时长排序
 // @namespace    http://tampermonkey.net/
-// @version      2026.8.16.2
-// @description  根据 URL 参数 wl_added、wl_dur 或 wl_views 对稍后再看播放器的播放列表排序
+// @version      2026.8.25.1
+// @description  根据 URL 参数对稍后再看播放器的播放列表排序
 // @author       taozhuang
 // @match        https://www.bilibili.com/list/watchlater*
 // @grant        none
@@ -12,19 +12,25 @@
 (function () {
   'use strict';
 
-  // 排序方式直接写在 URL 里:wl_added 按添加时间,wl_dur 按时长,wl_views 按播放量。
+  // 排序方式直接写在 URL 里:wl_added 按添加时间,wl_dur 按时长,
+  // wl_views 按播放量,wl_progress 按观看进度。
   // 没有有效参数就完全不介入,保持播放器原本(按添加时间)的顺序。
   const params = new URLSearchParams(location.search);
   const addedDir = params.get('wl_added');
   const durationDir = params.get('wl_dur');
   const viewsDir = params.get('wl_views');
-  const sortMetric = viewsDir === 'desc' || viewsDir === 'asc'
-    ? 'views'
-    : durationDir === 'desc' || durationDir === 'asc'
-      ? 'duration'
-      : addedDir === 'desc' || addedDir === 'asc' ? 'added' : null;
+  const progressDir = params.get('wl_progress');
+  const sortMetric = progressDir === 'desc' || progressDir === 'asc'
+    ? 'progress'
+    : viewsDir === 'desc' || viewsDir === 'asc'
+      ? 'views'
+      : durationDir === 'desc' || durationDir === 'asc'
+        ? 'duration'
+        : addedDir === 'desc' || addedDir === 'asc' ? 'added' : null;
   if (!sortMetric) return;
-  const dir = sortMetric === 'views' ? viewsDir : sortMetric === 'duration' ? durationDir : addedDir;
+  const dir = sortMetric === 'progress'
+    ? progressDir
+    : sortMetric === 'views' ? viewsDir : sortMetric === 'duration' ? durationDir : addedDir;
   const descending = dir === 'desc';
 
   function byValue(getValue) {
@@ -62,6 +68,18 @@
   function arcViews(item) {
     const views = item && item.arc_info && item.arc_info.stat && item.arc_info.stat.view;
     return typeof views === 'number' ? views : null;
+  }
+
+  /**
+    * @param {{ progress?: number, arc_info?: { duration?: number } } | null | undefined} item
+   * @returns {number | null}
+   */
+  function arcProgress(item) {
+    const progress = item && item.progress;
+    const duration = arcDuration(item);
+    return typeof progress === 'number' && progress >= 0 && duration > 0
+      ? progress / duration
+      : null;
   }
 
   function formatViews(n) {
@@ -230,9 +248,9 @@
     if (!Array.isArray(list) || !list.length) return;
 
     list = list.filter((x) => x && x.arc_info);
-    const getSortValue = sortMetric === 'views'
-      ? arcViews
-      : sortMetric === 'duration' ? arcDuration : arcAddedAt;
+    const getSortValue = sortMetric === 'progress'
+      ? arcProgress
+      : sortMetric === 'views' ? arcViews : sortMetric === 'duration' ? arcDuration : arcAddedAt;
     list.sort(byValue(getSortValue));
     const total = list.length;
     const items = list.map((it, i) => toResourceItem(it, i, total));

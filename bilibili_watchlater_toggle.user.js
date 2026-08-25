@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 稍后再看排序 Toggle
 // @namespace    http://tampermonkey.net/
-// @version      2026.8.20.1
-// @description  主按钮显示当前排序，悬浮菜单提供另外两项，点击主按钮时反转顺序
+// @version      2026.8.25.1
+// @description  主按钮显示当前排序，悬浮菜单提供其它排序项，点击主按钮时反转顺序
 // @author       taozhuang
 // @match        https://www.bilibili.com/watchlater/list*
 // @match        https://www.bilibili.com/watchlater*
@@ -20,11 +20,13 @@
     added: '添加时间',
     views: '播放量',
     duration: '时长',
+    progress: '观看进度',
   };
   const DIRECTION_LABELS = {
     added: { asc: '旧到新', desc: '新到旧' },
     views: { asc: '少到多', desc: '多到少' },
     duration: { asc: '短到长', desc: '长到短' },
+    progress: { asc: '少到多', desc: '多到少' },
   };
 
   let activeSortMetric = null;
@@ -36,6 +38,7 @@
     if (activeSortMetric === 'added') return ['wl_added', activeSortDirection];
     if (activeSortMetric === 'duration') return ['wl_dur', activeSortDirection];
     if (activeSortMetric === 'views') return ['wl_views', activeSortDirection];
+    if (activeSortMetric === 'progress') return ['wl_progress', activeSortDirection];
     return null;
   }
 
@@ -43,6 +46,7 @@
     url.searchParams.delete('wl_added');
     url.searchParams.delete('wl_dur');
     url.searchParams.delete('wl_views');
+    url.searchParams.delete('wl_progress');
     if (sortParam) url.searchParams.set(sortParam[0], sortParam[1]);
   }
 
@@ -216,6 +220,20 @@
     );
   }
 
+  /**
+   * @param {boolean} descending
+   * @returns {Promise<boolean>}
+   */
+  function sortByProgress(descending) {
+    return sortByApiValue((item) => {
+      const progress = item && item.progress;
+      const duration = item && item.arc_info && item.arc_info.duration;
+      return typeof progress === 'number' && progress >= 0 && duration > 0
+        ? progress / duration
+        : null;
+    }, descending);
+  }
+
   let sorting = false;
   function updateSortMenu() {
     const button = document.querySelector('button.order-btn');
@@ -251,7 +269,9 @@
     setSortingBusy(true);
     const sort = sortMetric === 'added'
       ? sortByAddedTime
-      : sortMetric === 'views' ? sortByViews : sortByDuration;
+      : sortMetric === 'views'
+        ? sortByViews
+        : sortMetric === 'duration' ? sortByDuration : sortByProgress;
     sort(descending).then((sorted) => {
       if (sorted) {
         updateSortMenu();
@@ -315,7 +335,7 @@
 
     if (!panel.querySelector('.wl-sort-menu-item')) {
       sortMenuItems.clear();
-      for (const metric of ['added', 'views', 'duration']) {
+      for (const metric of ['added', 'views', 'duration', 'progress']) {
         const item = template.cloneNode(false);
         item.hidden = false;
         item.classList.remove('wl-native-order-item');

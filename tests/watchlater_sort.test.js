@@ -19,6 +19,7 @@ const apiItems = [
     bvid: 'BV_LOW_DURATION',
     cid: 1,
     add_at: 100,
+    progress: 20,
     arc_info: {
       aid: 1,
       cid: 1,
@@ -32,6 +33,7 @@ const apiItems = [
     bvid: 'BV_LOW_VIEWS',
     cid: 2,
     add_at: 200,
+    progress: 160,
     arc_info: {
       aid: 2,
       cid: 2,
@@ -45,6 +47,7 @@ const apiItems = [
     bvid: 'BV_HIGH_DURATION',
     cid: 3,
     add_at: 300,
+    progress: 150,
     arc_info: {
       aid: 3,
       cid: 3,
@@ -161,7 +164,7 @@ async function runPlayer(search, items = apiItems, listHarness = null) {
   };
 }
 
-test('player sorts the full queue by views and preserves duration sorting', async () => {
+test('player sorts the full queue by each supported metric', async () => {
   assert.deepEqual((await runPlayer('?wl_added=asc')).bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -197,6 +200,18 @@ test('player sorts the full queue by views and preserves duration sorting', asyn
     'BV_MISSING_VIEWS',
     'BV_LOW_VIEWS',
     'BV_HIGH_DURATION',
+  ]);
+  assert.deepEqual((await runPlayer('?wl_progress=asc')).bvids, [
+    'BV_LOW_DURATION',
+    'BV_HIGH_DURATION',
+    'BV_LOW_VIEWS',
+    'BV_MISSING_VIEWS',
+  ]);
+  assert.deepEqual((await runPlayer('?wl_progress=desc')).bvids, [
+    'BV_LOW_VIEWS',
+    'BV_HIGH_DURATION',
+    'BV_LOW_DURATION',
+    'BV_MISSING_VIEWS',
   ]);
   assert.deepEqual(await runPlayer(''), {
     bvids: ['ORIGINAL'],
@@ -521,7 +536,7 @@ async function createToggleHarness({ includeDurationStats = true, items = apiIte
     await flushAsyncWork();
   }
 
-  function videoUrl(initialHref = '/list/watchlater?bvid=BV_LOW_DURATION&wl_dur=desc&wl_views=desc') {
+  function videoUrl(initialHref = '/list/watchlater?bvid=BV_LOW_DURATION&wl_dur=desc&wl_views=desc&wl_progress=desc') {
     const videoLink = {
       href: initialHref,
       getAttribute() {
@@ -595,12 +610,12 @@ test('refresh reflects native added order and keeps the other metrics in the men
   const harness = await createToggleHarness();
 
   let state = harness.state();
-  assert.deepEqual(state.controls.map((control) => control.label), ['添加时间', '播放量', '时长']);
+  assert.deepEqual(state.controls.map((control) => control.label), ['添加时间', '播放量', '时长', '观看进度']);
   assert.deepEqual(activeControl(state), { active: true, label: '添加时间', metric: 'added' });
   assert.ok(state.menuClassNames.every((className) => /menu-popover__panel-item/.test(className)));
   assert.equal(state.mainLabel, '添加时间');
   assert.equal(state.mainTitle, '添加时间：新到旧');
-  assert.deepEqual(state.visibleMenuLabels, ['播放量', '时长']);
+  assert.deepEqual(state.visibleMenuLabels, ['播放量', '时长', '观看进度']);
   assert.equal(state.fetchCalls, 0);
   assert.equal(state.scrollCalls, 0);
   assert.deepEqual(state.bvids, [
@@ -615,7 +630,7 @@ test('refresh reflects native added order and keeps the other metrics in the men
   state = harness.state();
   assert.equal(state.mainLabel, '添加时间');
   assert.equal(state.mainTitle, '添加时间：旧到新');
-  assert.deepEqual(state.visibleMenuLabels, ['播放量', '时长']);
+  assert.deepEqual(state.visibleMenuLabels, ['播放量', '时长', '观看进度']);
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -629,7 +644,7 @@ test('refresh reflects native added order and keeps the other metrics in the men
   assert.equal(activeControl(state).metric, 'views');
   assert.equal(state.mainLabel, '播放量');
   assert.equal(state.mainTitle, '播放量：少到多');
-  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长']);
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长', '观看进度']);
   assert.deepEqual(state.bvids, [
     'BV_LOW_VIEWS',
     'BV_HIGH_DURATION',
@@ -639,12 +654,13 @@ test('refresh reflects native added order and keeps the other metrics in the men
   assert.equal(harness.videoUrl().searchParams.get('wl_views'), 'asc');
   assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
   assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
+  assert.equal(harness.videoUrl().searchParams.has('wl_progress'), false);
 
   await harness.clickCurrent();
   state = harness.state();
   assert.equal(state.mainLabel, '播放量');
   assert.equal(state.mainTitle, '播放量：多到少');
-  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长']);
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长', '观看进度']);
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_HIGH_DURATION',
@@ -658,7 +674,7 @@ test('refresh reflects native added order and keeps the other metrics in the men
   assert.equal(activeControl(state).metric, 'duration');
   assert.equal(state.mainLabel, '时长');
   assert.equal(state.mainTitle, '时长：短到长');
-  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量']);
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量', '观看进度']);
   assert.deepEqual(state.bvids, [
     'BV_LOW_DURATION',
     'BV_MISSING_VIEWS',
@@ -670,7 +686,7 @@ test('refresh reflects native added order and keeps the other metrics in the men
   state = harness.state();
   assert.equal(state.mainLabel, '时长');
   assert.equal(state.mainTitle, '时长：长到短');
-  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量']);
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量', '观看进度']);
   assert.deepEqual(state.bvids, [
     'BV_HIGH_DURATION',
     'BV_LOW_VIEWS',
@@ -681,13 +697,42 @@ test('refresh reflects native added order and keeps the other metrics in the men
   assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
   assert.equal(harness.videoUrl().searchParams.has('wl_views'), false);
 
+  await harness.chooseMenu('progress');
+  state = harness.state();
+  assert.equal(activeControl(state).metric, 'progress');
+  assert.equal(state.mainLabel, '观看进度');
+  assert.equal(state.mainTitle, '观看进度：少到多');
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '播放量', '时长']);
+  assert.deepEqual(state.bvids, [
+    'BV_LOW_DURATION',
+    'BV_HIGH_DURATION',
+    'BV_LOW_VIEWS',
+    'BV_MISSING_VIEWS',
+  ]);
+  assert.equal(harness.videoUrl().searchParams.get('wl_progress'), 'asc');
+  assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
+  assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
+  assert.equal(harness.videoUrl().searchParams.has('wl_views'), false);
+
+  await harness.clickCurrent();
+  state = harness.state();
+  assert.equal(state.mainTitle, '观看进度：多到少');
+  assert.deepEqual(state.bvids, [
+    'BV_LOW_VIEWS',
+    'BV_HIGH_DURATION',
+    'BV_LOW_DURATION',
+    'BV_MISSING_VIEWS',
+  ]);
+  assert.equal(harness.videoUrl().searchParams.get('wl_progress'), 'desc');
+
   await harness.chooseMenu('views');
   state = harness.state();
   assert.equal(activeControl(state).metric, 'views');
   assert.equal(state.mainLabel, '播放量');
   assert.equal(state.mainTitle, '播放量：少到多');
-  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长']);
+  assert.deepEqual(state.visibleMenuLabels, ['添加时间', '时长', '观看进度']);
   assert.equal(harness.videoUrl().searchParams.get('wl_views'), 'asc');
   assert.equal(harness.videoUrl().searchParams.has('wl_added'), false);
   assert.equal(harness.videoUrl().searchParams.has('wl_dur'), false);
+  assert.equal(harness.videoUrl().searchParams.has('wl_progress'), false);
 });
